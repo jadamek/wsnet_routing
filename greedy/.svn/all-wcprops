@@ -1,0 +1,47 @@
+K 25
+svn:wc:ra_dav:version-url
+V 48
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy
+END
+test1.xml
+K 25
+svn:wc:ra_dav:version-url
+V 58
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/test1.xml
+END
+city.csv
+K 25
+svn:wc:ra_dav:version-url
+V 57
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/city.csv
+END
+configure.ac
+K 25
+svn:wc:ra_dav:version-url
+V 61
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/configure.ac
+END
+greedy_noapprox.c
+K 25
+svn:wc:ra_dav:version-url
+V 66
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/greedy_noapprox.c
+END
+city_grid.csv
+K 25
+svn:wc:ra_dav:version-url
+V 62
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/city_grid.csv
+END
+Makefile.am
+K 25
+svn:wc:ra_dav:version-url
+V 60
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/Makefile.am
+END
+random.csv
+K 25
+svn:wc:ra_dav:version-url
+V 59
+/courses/cs43203/svn/!svn/ver/532/jrobin8/greedy/random.csv
+END
