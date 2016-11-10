@@ -81,8 +81,14 @@ int GET_HEADER_SIZE(call_t *c);
 /* edit by Quentin Lampin <quentin.lampin@orange-ftgroup.com> */
 int GET_HEADER_REAL_SIZE(call_t *c);
 /* end of edition */
-/*edit by James RObinson */
+/*edit by James Robinson */
 void* GET_BUFFER(call_t *call);
 void SET_BUFFER(calll_t *call, void *new_buffer);
+
+typedef struct
+{
+    packet_t *packet;
+    event_t *event;
+}buffer_entry_t;
 /* end of edition */
 #endif //__modelutils__

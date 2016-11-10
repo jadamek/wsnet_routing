@@ -1,5 +1,5 @@
-// cfr.c
-// Concurrent Face Routing Module
+// gcfr.c
+// Greedy Concurrent Face Routing Module
 // James Robinson
 // 10/1/2016
 
@@ -16,7 +16,7 @@
 
 model_t model = 
 {
-    "Concurrent Face Routing",
+    "Greedy Concurrent Face Routing",
     "James Robinson",
     "0.1",
     MODELTYPE_ROUTING,
@@ -63,7 +63,8 @@ model_t model =
 ////////////////////////////////////////////////////////////////////////////////
 // Structures and Typedefs
 
-typedef enum {HELLO_PACKET, DATA_PACKET, LM_PACKET} direction_e;
+typedef enum {HELLO_PACKET, G_DATA_PACKET, CFR_DATA_PACKET, LM_PACKET}
+    direction_e;
 typedef enum {NO_DIR, TRAVERSE_R, TRAVERSE_L, BOTH} packet_e;
 typedef enum {NO_INT, INTERSECTION, COLLINEAR} intersection_e;
 typedef enum {NOT_FOUND, FOUND_THIS, FOUND_OTHER_1, FOUND_OTHER_2} mate_e;
@@ -131,7 +132,10 @@ int hello_callback(call_t *call, void *args);
 void tx(call_t *call, packet_t *packet);
 
 //routing functions
-void forward(call_t *call, packet_t *packet);
+void g_forward(call_t *call, packet_t *packet);
+destination_t* find_closest_node(call_t *call, destination_t goal,
+    destination_t my_pos);
+void cfr_forward(call_t *call, packet_t *packet);
 destination_t next_on_face(call_t *call, destination_t *start,
     destination_t *nodeRefs, direction_e direction);
 void traverse_first_face(call_t *call, packet_t *packet);
@@ -152,7 +156,7 @@ intersection_e check_intersect(call_t *call, destination_t *source,
     destination_t *dest, destination_t *next);
 bool node_present_in(void *das, destination_t *id);
 bool on_gg(call_t *call);
-packet_t* copy_packet(call_t *call, packet_t *packet, header_t* header,
+packet_t* copy_packet(call_t *call, packet_t *packet, header_t* header, 
     operation_e operation);
 int set_mac_header_tx(call_t *call, packet_t *packet);
 
@@ -347,16 +351,18 @@ int bootstrap(call_t *call)
 //in that module
 int set_header(call_t *call, packet_t *packet, destination_t *dest)
 {
+    entity_data_t *entity_data = ENTITY_DATA(call);
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     call_t call_down = CALL_DOWN(call);
     destination_t my_pos = THIS_DESTINATION(call), no_dest = NO_DESTINATION;
 
+    entity_data->num_packets++;
     header->src = my_pos;
     header->dest = *dest;
     header->sender = no_dest;
     header->next_node = no_dest;
-    header->type = DATA_PACKET;
+    header->type = G_DATA_PACKET;
     header->direction = NO_DIR;
 
     if(compare_destinations(&header->dest, &no_dest))
@@ -537,21 +543,32 @@ void tx(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
 
-    //traversing first face
-    if(header->sender.id == NONE)
+    if(header->type == G_DATA_PACKET)
     {
 	//if at source and destination is neighbor, deliver packet
 	if(node_present_in(node_data->nbrs, &header->dest))
 	{
-	    entity_data_t *entity_data = ENTITY_DATA(call);
-	    entity_data->num_packets++;
 	    deliver_packet(call, packet);
 	    return;
 	}
-	traverse_first_face(call, packet);
+	g_forward(call, packet);
     }
-    else
-	forward(call, packet);
+    else if(header->type == CFR_DATA_PACKET)
+    {
+	//traversing first face
+	if(header->sender.id == NONE)
+	{
+	    //if at source and destination is neighbor, deliver packet
+	    if(node_present_in(node_data->nbrs, &header->dest))
+	    {
+		deliver_packet(call, packet);
+		return;
+	    }
+	    traverse_first_face(call, packet);
+	}
+	else
+	    cfr_forward(call, packet);
+    }
     return;
 }
 
@@ -559,8 +576,73 @@ void tx(call_t *call, packet_t *packet)
 ////////////////////////////////////////////////////////////////////////////////
 // Routing Functions
 
-//basic packet forwarding
-void forward(call_t *call, packet_t *packet)
+//basic greedy packet forwarding
+void g_forward(call_t *call, packet_t *packet)
+{
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t no_dest = NO_DESTINATION;
+
+#ifdef LOG_ROUTING
+    if(compare_destinations(&header->next_node, &no_dest))
+	PRINT_ROUTING("[RTG] start routing from %d to %d\n", header->src.id,
+	    header->dest.id);
+#endif
+
+    destination_t my_pos = THIS_DESTINATION(call), *next_node =
+	find_closest_node(call, header->dest, my_pos);
+    if(compare_destinations(next_node, &my_pos))
+    {
+#ifdef LOG_ROUTING
+	PRINT_ROUTING("[RTG] found local minimum, switching to cfr\n");
+#endif
+	header->type = CFR_DATA_PACKET;
+	header->src = my_pos;
+	tx(call, packet);
+    }
+    else
+    {
+	header->next_node = *next_node;
+#ifdef LOG_ROUTING
+	PRINT_ROUTING("[RTG] greedy routing from %d to %d\n", call->node,
+	header->next_node.id);
+#endif
+	if(set_mac_header_tx(call, packet) == ERROR)
+	{
+	    fprintf(stderr, "[ERR] Can't route packet\n");
+	    return;
+	}
+    }
+}
+
+//finds closest node in terms of euclidean distance
+destination_t* find_closest_node(call_t *call, destination_t goal,
+    destination_t my_pos)
+{
+    node_data_t *node_data = NODE_DATA(call);
+    destination_t *tmp_node = NULL, *winner = NULL;
+    double distance = 0, tmp_dist = 0;
+
+    winner = &my_pos;
+    distance = fabs(hypot((goal.position.x - my_pos.position.x),
+	(goal.position.y - my_pos.position.y)));
+
+    das_init_traverse(node_data->gg_list);
+    while((tmp_node = (destination_t*)das_traverse(node_data->gg_list)) != NULL)
+    {
+	tmp_dist = fabs(hypot((goal.position.x - tmp_node->position.x),
+	    (goal.position.y - tmp_node->position.y)));
+	if(tmp_dist < distance)
+	{
+	    distance = tmp_dist;
+	    winner = tmp_node;
+	}
+    }
+    return winner;
+}
+
+//basic cfr packet forwarding
+void cfr_forward(call_t *call, packet_t *packet)
 {
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
@@ -1000,12 +1082,15 @@ int set_mac_header_tx(call_t *call, packet_t *packet)
     call_t call_down = CALL_DOWN(call);
     destination_t no_dest = NO_DESTINATION;
 
-    if(compare_destinations(&header->sender, &no_dest))
+    if(header->type == CFR_DATA_PACKET)
     {
-	fprintf(stderr, "[ERR] Invalid sender\n");
-	packet_dealloc(packet);
-	packet = NULL;
-	return ERROR;
+	if(compare_destinations(&header->sender, &no_dest))
+	{
+	    fprintf(stderr, "[ERR] Invalid sender\n");
+	    packet_dealloc(packet);
+	    packet = NULL;
+	    return ERROR;
+	}
     }
     if(compare_destinations(&header->next_node, &no_dest))
     {
@@ -1051,7 +1136,7 @@ bool combine_packets(call_t *call, destination_t *sender,
     while((entry = (buffer_entry_t*)das_traverse(buffer)) != NULL)
     {
 	header_t *header = PACKET_HEADER(entry->packet, node_data);
-	if(header->type == DATA_PACKET &&
+	if(header->type == CFR_DATA_PACKET &&
 	    compare_destinations(sender, &header->sender) &&
 	    compare_destinations(next_node, &header->next_node))
 	{
@@ -1084,7 +1169,8 @@ packet_t* copy_packet(call_t *call, packet_t *packet, header_t* header,
     copy_header->type = header->type;
     copy_header->direction = header->direction;
 
-    entity_data->num_packets++;
+    if(operation == INCREMENT)
+	entity_data->num_packets++;
     return copy_packet;
 }
 
@@ -1109,7 +1195,31 @@ void rx(call_t *call, packet_t *packet)
 	    packet = NULL;
 	    header = NULL;
 	    break;
-	case DATA_PACKET:
+	case G_DATA_PACKET:
+	    entity_data->total_num_hops++;
+	    if(header->dest.id == call->node)
+	    {
+		if(entity_data->deliver_num_hops == 0)
+		    entity_data->deliver_num_hops = entity_data->total_num_hops;
+		while(i--)
+		{
+		    call_t call_up = {up->elts[i], call->node, call->entity};
+		    packet_t *packet_up;
+		    if(i > 0)
+			packet_up = copy_packet(call, packet, header,
+			    DONT_INCREMENT);
+		    else if(header->type == LM_PACKET)
+			packet_up = packet;
+		    else
+			packet_up = copy_packet(call, packet, header,
+			    DONT_INCREMENT);
+		    RX(&call_up, packet_up);
+		}
+	    }
+	    else
+		tx(call, packet);
+	    break;
+	case CFR_DATA_PACKET:
 	    entity_data->total_num_hops++;
 	    //check for mates, if new packet was dropped break
 	    if((result = find_mate(call, packet)) == FOUND_OTHER_1)

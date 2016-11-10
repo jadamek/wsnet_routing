@@ -81,6 +81,7 @@ int init(call_t *call, void *params)
     //init values
     entity_data->data_tx = 0;
     entity_data->data_rx = 0;
+    entity_data->latency = 0;
     entity_data->source = empty_destination;
     entity_data->destination = empty_destination;
 
@@ -96,13 +97,9 @@ int init(call_t *call, void *params)
 		entity_data->source.id);
     }
 
-    if(entity_data->source.id == entity_data->destination.id)
-    {
-	fprintf(stderr, "[ERR] source and destination the same\n");
-	free(entity_data);
-	return ERROR;
-    }
-
+    while(entity_data->source.id == entity_data->destination.id)
+	get_param_nodeid("random", &(entity_data->source.id),
+	    entity_data->destination.id);
     //save private data
     set_entity_private_data(call, entity_data);
     return 0;
@@ -114,16 +111,13 @@ int init(call_t *call, void *params)
 int destroy(call_t *call)
 {
     struct entity_data *entity_data = get_entity_private_data(call);
-    destination_t empty_destination = EMPTY_DESTINATION;
 
     fprintf(stderr, "Application Statistics:\n");
-    if(!compare_destinations(&entity_data->source, &empty_destination) &&
-	!compare_destinations(&entity_data->destination, &empty_destination))
-	PRINT_APPLICATION("  message sent from %d to %d\n",
+    fprintf(stderr, "  message sent from %d to %d\n",
 	entity_data->source.id, entity_data->destination.id);
     fprintf(stderr, "  num messages sent: %d\n", entity_data->data_tx);
     fprintf(stderr, "  num messages received: %d\n", entity_data->data_rx);
-    fprintf(stderr, "  packet delivery rate: %f\n",
+    fprintf(stderr, "  message delivery rate: %f\n",
 	(double)entity_data->data_rx / (double)entity_data->data_tx);
     fprintf(stderr, "  latency: %lld nanoseconds\n", entity_data->latency);
 
@@ -228,7 +222,8 @@ void rx(call_t *call, packet_t *packet)
 {
     struct entity_data *entity_data = get_entity_private_data(call);
 
-    entity_data->latency = get_time() - DEFAULT_START_TIME;
+    if(entity_data->latency == 0)
+	entity_data->latency = get_time() - DEFAULT_START_TIME;
     entity_data->data_rx++;
     packet_dealloc(packet);
     return;
