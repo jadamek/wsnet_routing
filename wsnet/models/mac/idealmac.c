@@ -151,12 +151,13 @@ int tx_delay(call_t *c, void *args) {
     position_t *local = get_node_position(c->node);
     int i = 0;
     
-    packet_t *packet;
-    if ((packet = (packet_t *) das_pop_FIFO(nodedata->buffer)) == NULL)
+    buffer_entry_t *entry;
+    das_init_traverse(nodedata->buffer);
+    if((entry = (buffer_entry_t*)das_pop_FIFO(nodedata->buffer)) == NULL)
       return 0;
-    
-    struct _mac_header *header = (struct _mac_header *) packet->data;
 
+   struct _mac_header *header = (struct _mac_header *) entry->packet->data;
+ 
     /* Broadcast packet */
     if (header->type == BROADCAST_TYPE) {
 #ifdef LOG_MAC
@@ -166,12 +167,11 @@ int tx_delay(call_t *c, void *args) {
       for(i = 0; i < get_node_count(); i++) {
 	
 	if (i != c->node) {
-	  
                 if (distance(get_node_position(i), local) <= entitydata->range) {
 		  call_t c0 = {-1, i, -1};
 		  array_t *macs = get_mac_entities(&c0);
 		  c0.entity = macs->elts[0];
-		  packet_t *packet_up = packet_clone(packet);         
+		  packet_t *packet_up = packet_clone(entry->packet);         
 		  RX(&c0, packet_up);
 #ifdef LOG_MAC
 		  fprintf(stdout, "[MAC] node %d delivers a packet to node %d\n", c->node, i);
@@ -179,16 +179,15 @@ int tx_delay(call_t *c, void *args) {
                 }
 	}       
       }
-      packet_dealloc(packet);
-    } 
+      packet_dealloc(entry->packet);
+    }
     /* Unicast packet */
     else if (header->type == UNICAST_TYPE){
-      
       if (distance(get_node_position(header->dst), local) <= entitydata->range) {
 	call_t c0 = {-1, header->dst, -1};
 	array_t *macs = get_mac_entities(&c0);
 	c0.entity = macs->elts[0];
-	RX(&c0, packet);
+	RX(&c0, entry->packet);
 #ifdef LOG_MAC
 	fprintf(stdout,"[MAC] node %d delivers a packet to node %d\n", c->node, header->dst);
 #endif
@@ -197,14 +196,14 @@ int tx_delay(call_t *c, void *args) {
 #ifdef LOG_MAC
 	fprintf(stdout,"[MAC] node %d: destination node %d is unreachable !!!\n",c->node, header->dst);
 #endif
-	packet_dealloc(packet);
+	packet_dealloc(entry->packet);
       }
     }
     else {
 #ifdef LOG_MAC
       fprintf(stderr,"[MAC] Unknown packet type (%d) !!!\n", header->type);
 #endif
-      packet_dealloc(packet);
+      packet_dealloc(entry->packet);
     }
 
     
@@ -214,10 +213,10 @@ int tx_delay(call_t *c, void *args) {
     }
     else {
       das_init_traverse(nodedata->buffer);
-      if ((packet = (packet_t *) das_traverse(nodedata->buffer)) == NULL)
+      if ((entry = (buffer_entry_t *) das_traverse(nodedata->buffer)) == NULL)
 	return 0;
       
-      uint64_t delay = get_time() + (packet->size / entitydata->bandwidth) * ONE_MS;
+      uint64_t delay = get_time() + (entry->packet->size / entitydata->bandwidth) * ONE_MS;
       scheduler_add_callback(delay, c, tx_delay, NULL);
     }
 #endif
@@ -232,19 +231,21 @@ int tx_delay(call_t *c, void *args) {
 void tx(call_t *c, packet_t *packet) {
     struct entitydata *entitydata = get_entity_private_data(c);
     struct nodedata *nodedata = get_node_private_data(c);
-
-    das_insert(nodedata->buffer, (void *) packet);
+    buffer_entry_t *entry = malloc(sizeof(buffer_entry_t));
+    entry->packet = packet;
     int duration = packet->size / entitydata->bandwidth * ONE_MS;
 
 #ifdef ONE_PACKET_AT_A_TIME
    if (nodedata->scheduler == 0) {
         nodedata->scheduler = 1;
         uint64_t delay = get_time() + duration;
-        scheduler_add_callback(delay, c, tx_delay, NULL);
+        entry->event = scheduler_add_callback(delay, c, tx_delay, NULL);
+	das_insert(nodedata->buffer, (void*)entry);
     }
 #else
    uint64_t delay = get_time() + duration;
-   scheduler_add_callback(delay, c, tx_delay, NULL);   
+   entry->event = scheduler_add_callback(delay, c, tx_delay, NULL);
+   das_insert(nodedata->buffer, (void*)entry);
 #endif
 }
 
@@ -303,11 +304,33 @@ int get_header_real_size(call_t *c) {
 
 /* ************************************************** */
 /* ************************************************** */
+
+//returns buffer
+void* get_buffer(call_t *call)
+{
+    struct nodedata *node_data = get_node_private_data(call);
+
+    return node_data->buffer;
+}
+
+//sets buffer
+void set_buffer(call_t *call, void* new_buffer)
+{
+    struct nodedata *node_data = get_node_private_data(call);
+    das_destroy(node_data->buffer);
+    node_data->buffer = new_buffer;
+    set_node_private_data(call, node_data);
+}
+
+/* ************************************************** */
+/* ************************************************** */
 mac_methods_t methods = {rx, 
                          tx,
                          set_header, 
                          get_header_size,
-                         get_header_real_size};
+                         get_header_real_size,
+			 get_buffer,
+			 set_buffer};
 
 
     
