@@ -83,7 +83,7 @@ int GET_HEADER_REAL_SIZE(call_t *c);
 /* end of edition */
 /*edit by James Robinson */
 void* GET_BUFFER(call_t *call);
-void SET_BUFFER(calll_t *call, void *new_buffer);
+void SET_BUFFER(call_t *call, void *new_buffer);
 
 typedef struct
 {
