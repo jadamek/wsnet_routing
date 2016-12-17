@@ -12,7 +12,7 @@
 
 model_t model =
 {
-    "Single Unicast Model",
+    "Single Geocast Model",
     "James Robinson",
     "0.1",
     MODELTYPE_APPLICATION,
@@ -51,6 +51,7 @@ struct entity_data
 {
     destination_t source;
     destination_t destination;
+    int num_targets;
     int data_tx;
     int data_rx;
     uint64_t latency;
@@ -81,6 +82,7 @@ int init(call_t *call, void *params)
     double size = -1;
 
     //init values
+    entity_data->num_targets = 0;
     entity_data->data_tx = 0;
     entity_data->data_rx = 0;
     entity_data->latency = 0;
@@ -123,6 +125,7 @@ int init(call_t *call, void *params)
 	entity_data->destination.position.x = tmp1;
 	entity_data->destination.position.y = tmp2;
     }
+    entity_data->destination.position.z = 0;
 
     //save private data
     set_entity_private_data(call, entity_data);
@@ -135,15 +138,30 @@ int init(call_t *call, void *params)
 int destroy(call_t *call)
 {
     struct entity_data *entity_data = get_entity_private_data(call);
+    FILE *results;
+    char *name = (char*)malloc(11 * sizeof(int));
+    sprintf(name, "results.txt");
 
     fprintf(stderr, "Application Statistics:\n");
-    fprintf(stderr, "  message sent from %d", entity_data->source.id);
+    fprintf(stderr, "  message sent from %d\n", entity_data->source.id);
+    fprintf(stderr, "  message sent to %f, %f, %f\n",
+	entity_data->destination.position.x,
+	entity_data->destination.position.y,
+	entity_data->destination.position.z);
+    fprintf(stderr, "  Number of targets: %d\n", entity_data->num_targets);
     fprintf(stderr, "  num messages sent: %d\n", entity_data->data_tx);
     fprintf(stderr, "  num messages received: %d\n", entity_data->data_rx);
     fprintf(stderr, "  message delivery rate: %f\n",
 	(double)entity_data->data_rx / (double)entity_data->data_tx);
     fprintf(stderr, "  latency: %lld nanoseconds\n", entity_data->latency);
 
+    if((results = fopen(name, "a")) == NULL)
+	fprintf(stderr, "[ERR] Couldn't open file: results.txt\n");
+    else
+	fprintf(results, "%d\t%d\t%lld\t", entity_data->num_targets,
+	    (int)entity_data->data_rx, entity_data->latency);
+
+    fclose(results);
     free(entity_data);
     return 0;
 }
@@ -195,6 +213,29 @@ int bootstrap(call_t *call)
     int i = get_entity_links_down_nbr(call);
     entityid_t *down = get_entity_links_down(call);
     node_data->overhead = 0;
+
+if(call->node == 0)
+fprintf(stderr, "[DBG] source: %d, destination: %f, %f, %f\n", entity_data->source.id, entity_data->destination.position.x, entity_data->destination.position.y, entity_data->destination.position.z);
+
+    //get number of targets
+    if(call->node == 0)
+    {
+	int tmp = get_node_count(), j;
+	for(j = 0; j < tmp; ++j)
+	{
+	    if(j == entity_data->source.id)
+		continue;
+	    destination_t tmp_dest = {j, *get_node_position(j)};
+
+	    if(tmp_dest.position.x >= entity_data->destination.position.x - 1 &&
+	       tmp_dest.position.x <= entity_data->destination.position.x + 1 &&
+	       tmp_dest.position.y >= entity_data->destination.position.y - 1 &&
+	       tmp_dest.position.y <= entity_data->destination.position.y + 1)
+	    {
+		entity_data->num_targets++;
+	    }
+	}
+    }
 
     //get overhead
     while(i--)
