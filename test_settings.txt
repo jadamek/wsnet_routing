@@ -1,0 +1,70 @@
+James Robinson
+12/17/2016
+
+current settings I've been using for wsnet testing:
+
+<simulation>
+    nodes = determined by density
+    (I've been using:
+    density 1: 32, density 2: 64, density 3: 95, density 4: 127,
+    density 5: 159, density 6: 191, density 7: 223, density 8: 255,
+    density 9: 286, density 10: 318, density 11: 350, density 12: 382,
+    density 13: 414, density 14: 446, density 15: 477, density 16: 509,
+    density 17: 541, density 18: 573, density 19: 605, density 20: 637)
+    duration = 20s (way more time than needed, but the simulator skips time when
+no events are scheduled, so it doesn't hurt.  If you don't put the 's' after the
+number, specifying seconds, then the time is read as nanoseconds)
+    x = 10
+    y = 10
+    z = 0
+
+Propagation:
+<propagation_range>
+    range = 1
+
+Interferences:
+<interferences_none>
+
+Modulation:
+<modulation_none>
+
+no moniter
+
+no noise
+
+Antenna:
+<antenna_omnidirectionnal>
+    delete all parameters and use default values
+(note: in the xml-parser they misspelled omnidirectional with the extra
+'n' like I did here, this is written into the form.xml, just don't try and
+correct it. TODO: fix that)
+
+Radio:
+<radio_half1d>
+    delete all parameters and use default values
+(note: it would probably be better to use a real radio than whatever this is,
+look into switching models)
+
+MAC:
+<mac_idealmac>
+    range = 1
+
+Routing:
+determined by what is being tested
+
+Application:
+determined by what is being tested
+
+Mobility:
+<mobility_static>
+    delete all parameters and use default values
+
+Battery:
+<energy_ideal_battery>
+
+Environment:
+    for propogation entry re-enter range number, should match what is specified
+in propagation module. (no, I don't know why you have to specify it twice)
+
+everything else should be specified in the form.xml file.  Mess with it at
+your own risk.
