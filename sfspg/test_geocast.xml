@@ -3,7 +3,7 @@
 
 <!-- Form config file for use with wsnet -->
 <!-- == Worldsens == (simulation settings) ================================= -->
-<simulation nodes="32" duration="20s" x="10" y="10" z="0"/>
+<simulation nodes="637" duration="20s" x="10" y="10" z="0"/>
 
 <!-- == Entities == (modules used in simuation ============================= -->
 
@@ -241,7 +241,12 @@
 </entity>
 -->
 
+<!--
 <entity name="routing" library="routing_sf">
+</entity>
+-->
+
+<entity name="routing" library="routing_sfspg">
 </entity>
 
 <!--

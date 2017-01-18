@@ -1,5 +1,5 @@
 // sf.c
-// Stateless Flooding Module
+// Stateless Flooding + Planar Geocasting (SF+SPG) Module
 // Jordan Adamek (partial source from James Robinson)
 // 12/18/2016
 
@@ -14,9 +14,9 @@
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
 
-model_t model = 
+model_t model =
 {
-    "Stateless Flooding",
+    "SF+SPG",
     "Jordan Adamek",
     "0.1",
     MODELTYPE_ROUTING,
@@ -83,8 +83,8 @@ typedef struct
     destination_t src;
     destination_t sender;
     destination_t next_node;
-    direction_e direction;
     packet_e type;
+    direction_e direction;
 }header_t;
 
 //Global node data, used for tracking information known to node
@@ -142,6 +142,10 @@ void forward_packet(call_t *call, packet_t *packet, direction_e direction);
 void deliver_packet(call_t *call, packet_t *packet);
 bool combine_packets(call_t *call, destination_t *sender,
     destination_t *next_node, direction_e direction);
+
+//sf-variant routing functions
+void sf_spray_packets(call_t *call, packet_t *packet);
+mate_e sf_find_mate(call_t * call, packet_t *packet);
 
 //receiving functions
 void rx(call_t *call, packet_t *packet);
@@ -224,7 +228,7 @@ int destroy(call_t *call)
     fprintf(stderr, "  number of hops to deliver: %d\n",
 	entity_data->deliver_num_hops);
     fprintf(stderr, "  total number of hops: %d\n",
-	entity_data->num_packets);
+	entity_data->total_num_hops);
 
 #ifdef LOG_GG
     gg_post_axes(call);
@@ -235,7 +239,7 @@ int destroy(call_t *call)
     if((results = fopen(name, "a")) == NULL)
 	fprintf(stderr, "[ERR] Couldn't open file: results.txt\n");
     else
-	fprintf(results, "%d\n", entity_data->num_packets);
+	fprintf(results, "%d\n", entity_data->total_num_hops);
 
     free(entity_data);
     entity_data = NULL;
@@ -549,9 +553,11 @@ void tx(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
 
-    //forward the packet
-    forward(call, packet);
-
+    //traversing first face
+    if(header->sender.id == NONE)
+	traverse_first_face(call, packet);
+    else
+	forward(call, packet);
 //getchar();
     return;
 }
@@ -563,8 +569,48 @@ void tx(call_t *call, packet_t *packet)
 //basic packet forwarding
 void forward(call_t *call, packet_t *packet)
 {
-    // Always just spray packets in every direction (Jordan)
-    spray_packets(call, packet);
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call);
+
+    // Message in region are FLOODING type, otherwise FACE type
+    if(check_in_geocast(&header->dest, &my_pos)){
+	sf_spray_packets(call, packet);
+    }
+    else{
+    	intersection_e result;
+    	destination_t tmp1 = next_on_face(call, &my_pos, &header->sender,
+	    TRAVERSE_R), tmp2 = next_on_face(call, &my_pos, &header->sender,
+	    TRAVERSE_L);
+        //if next edge segment has first endpoint colliner with source destination
+        //line
+        if((result = check_intersect(call, &header->src, &header->dest, &tmp1))
+	    == COLLINEAR || check_in_geocast(&header->dest, &my_pos))
+        {
+	    spray_packets(call, packet);
+	    return;
+        }
+        //else, if only one edge to continue along and a both packet needs to just
+        //continue routing without splitting
+        else if(header->direction == BOTH && compare_destinations(&tmp1, &tmp2))
+        {
+	    header->next_node = tmp1;
+	    header->sender =  my_pos;
+	    if(set_mac_header_tx(call, packet) == ERROR)
+	        fprintf(stderr, "[ERR] Can't route packet at %d\n", call->node);
+	    return;
+        }
+        //else just split packet and traverse in appropriate directions
+        else if(header->direction == BOTH)
+        {
+	    packet_t *packet_2 = copy_packet(call, packet, header, INCREMENT);
+	    forward_packet(call, packet, TRAVERSE_L);
+	    forward_packet(call, packet_2, TRAVERSE_R);
+	    return;
+        }
+        //else standard packet forwarding
+        forward_packet(call, packet, header->direction);
+    }
     return;
 }
 
@@ -865,16 +911,75 @@ void traverse_first_face(call_t *call, packet_t *packet)
     return;
 }
 
-// Spray packets always - flooding (Jordan)
+//spray packets when call node is COLLINEAR with source-destination line
 void spray_packets(call_t *call, packet_t *packet)
-{    
+{
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call), reference = header->sender;
+    bool sent = false;
+
+    //if packet to call->node was single directional, traverse previous edge
+    //backwards
+    if(compare_destinations(&reference, &my_pos))
+    {
+	reference = my_pos;
+    }
+    else if(header->direction != BOTH && !combine_packets(call,
+	&header->next_node, &header->sender, header->direction))
+    {
+	destination_t tmp = header->sender;
+	header->sender = header->next_node;
+	header->next_node = tmp;
+	if(set_mac_header_tx(call, packet) == ERROR)
+	    fprintf(stderr, "[ERR] Can't route packet\n");
+	sent = true;
+    }
+
+    //send a BOTH direction packet to every other neighbor
+    destination_t *gg_nbr = NULL;
+    int i, size = das_getsize(node_data->gg_list);
+    das_init_traverse(node_data->gg_list);
+    for(i = 0; i < size; ++i)
+    {
+	gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
+	if(!compare_destinations(gg_nbr, &reference))
+	{
+	    if(combine_packets(call, &my_pos, gg_nbr, BOTH))
+		continue;
+	    if(sent)
+	    {
+		packet = copy_packet(call, packet, header, INCREMENT);
+		header = PACKET_HEADER(packet, node_data);
+	    }
+	    header->sender = my_pos;
+	    header->next_node = *gg_nbr;
+	    header->direction = BOTH;
+	    if(set_mac_header_tx(call, packet) == ERROR)
+		fprintf(stderr, "[ERR] Can't route packet\n");
+	    sent = true;
+	}
+    }
+    if(!sent)
+    {
+	packet_dealloc(packet);
+	packet = NULL;
+	header = NULL;
+    }
+    return;
+}
+
+//flooding-variant of packet splitting - split too except previous
+// Spray packets always - flooding (Jordan)
+void sf_spray_packets(call_t *call, packet_t *packet)
+{
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call), previous = header->sender;
     bool sent = false;
 
     // <Jordan Debug>
-    //fprintf(stderr, "[RTG] Splitting packets at <%d> with previous <%d>\n", my_pos.id, previous.id);
+    //fprintf(stderr, "[RTG] Splitting packets at <%d> with previous <%d>\n", m$
 
     //send a packet to every other neighbor than previous
     destination_t *gg_nbr = NULL;
@@ -882,36 +987,37 @@ void spray_packets(call_t *call, packet_t *packet)
     das_init_traverse(node_data->gg_list);
     for(i = 0; i < size; ++i)
     {
-	gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
+        gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
         // <Jordan Debug>
-	//fprintf(stderr, "[RTG]   Considering destination node <%d>\n", gg_nbr->id);
-	
-	if(gg_nbr->id != previous.id)
-	{
-	    // <Jordan Debug>
-	    //fprintf(stderr, "[RTG]     Sending!!!\n");
-	    
-	    if(sent){
-		packet = copy_packet(call, packet, header, INCREMENT);
-	   	header = PACKET_HEADER(packet, node_data);
-	    }
-	    header->sender = my_pos;
-	    header->next_node = *gg_nbr;
-	    header->direction = NONE;
-	    if(set_mac_header_tx(call, packet) == ERROR)
-		fprintf(stderr, "[ERR] Can't route packet\n");
-	    sent = true;
-            
-	}
+        //fprintf(stderr, "[RTG]   Considering destination node <%d>\n", gg_nbr$
+
+        if(gg_nbr->id != previous.id)
+        {
+            // <Jordan Debug>
+            //fprintf(stderr, "[RTG]     Sending!!!\n");
+
+            if(sent){
+                packet = copy_packet(call, packet, header, INCREMENT);
+                header = PACKET_HEADER(packet, node_data);
+            }
+            header->sender = my_pos;
+            header->next_node = *gg_nbr;
+            header->direction = BOTH;
+            if(set_mac_header_tx(call, packet) == ERROR)
+                fprintf(stderr, "[ERR] Can't route packet\n");
+            sent = true;
+
+        }
     }
 
     if(!sent){
-    	packet_dealloc(packet);
-    	packet = NULL;
-    	header = NULL;
+        packet_dealloc(packet);
+        packet = NULL;
+        header = NULL;
     }
-    return;    
+    return;
 }
+
 
 //basic packet forwarding
 void forward_packet(call_t *call, packet_t *packet, direction_e direction)
@@ -1148,7 +1254,9 @@ void rx(call_t *call, packet_t *packet)
 	case DATA_PACKET:
 	    entity_data->total_num_hops++;
 	    //check for mates, if new packet was dropped break
-	    if((result = find_mate(call, packet)) == FOUND_OTHER_1)
+	    result = (check_in_geocast(&header->dest, &me) ? sf_find_mate(call, packet) : find_mate(call, packet));
+
+	    if(result == FOUND_OTHER_1)
 		break;
 	    //if mates not found, or mates found but new packet not dropped
 	    if(result != FOUND_THIS)
@@ -1189,7 +1297,6 @@ void rx(call_t *call, packet_t *packet)
     return;
 }
 
-// Mate is a packet whose previous is this packet's target <CHANGED> 
 mate_e find_mate(call_t *call, packet_t *packet)
 {
     node_data_t *node_data = NODE_DATA(call);
@@ -1201,9 +1308,26 @@ mate_e find_mate(call_t *call, packet_t *packet)
 	header->sender.id);
 #endif
 
-    // <Jordan Debug>
-    //fprintf(stderr, "[RTG] packet at %d from %d looking for mate\n", call->node,
-    //	header->sender.id);
+    //check to see if a both direction packet is its own mate, can occur on
+    //nodes with only one neighbor on GG graph
+    if(header->direction == BOTH)
+    {
+	destination_t tmp1 = next_on_face(call, &my_pos, &header->sender,
+	    TRAVERSE_R), tmp2 = next_on_face(call, &my_pos, &header->sender,
+	    TRAVERSE_L);
+	if(compare_destinations(&header->sender, &tmp1) &&
+	    compare_destinations(&header->sender, &tmp2))
+	{
+#ifdef LOG_ROUTING
+	    PRINT_ROUTING("[RTG] found mates at %d, deallocating packets\n",
+		call->node);
+#endif
+	    packet_dealloc(packet);
+	    packet = NULL;
+	    header = NULL;
+	    return FOUND_THIS;
+	}
+    }
 
     buffer_entry_t* entry = NULL;
     call_t call_down = CALL_DOWN(call);
@@ -1214,25 +1338,45 @@ mate_e find_mate(call_t *call, packet_t *packet)
     while((entry = (buffer_entry_t*)das_pop_FIFO(buffer)) != NULL)
     {
 	header_t *comp_header = PACKET_HEADER(entry->packet, node_data);
-	// EDIT: direction not considered (Jordan)
 	if(compare_destinations(&comp_header->next_node,  &header->sender) &&
-	    compare_destinations(&comp_header->sender, &header->next_node))
+	    compare_destinations(&comp_header->sender, &header->next_node) &&
+	    (comp_header->direction != header->direction ||
+	    (comp_header->direction == BOTH && header->direction == BOTH)))
 	{
 #ifdef LOG_ROUTING
 	    PRINT_ROUTING("[RTG] found mates at %d, deallocating packets\n",
 		call->node);
 #endif
-	    //<Jordan Debug>
-	    //fprintf(stderr, "[RTG] found mates at %d, deallocating packets\n",
-	    //	call->node);
-
+	    //if mate in buffer found is both packet
+	    if(comp_header->direction == BOTH && header->direction != BOTH)
+	    {
+		comp_header->direction = header->direction;
+		found = FOUND_OTHER_1;
+	    }
+	    //if mate found in buffer isn't both packet, but received packet is
+	    //both packet
+	    else if(header->direction == BOTH && comp_header->direction != BOTH)
+	    {
+		header->direction = comp_header->direction;
+		scheduler_delete_callback(call, entry->event);
+		packet_dealloc(entry->packet);
+		comp_header = NULL;
+		free(entry);
+		entry = NULL;
+		found = FOUND_OTHER_2;
+		continue;
+	    }
+	    //else if both mates are single direction packets
+	    else
+	    {
 		scheduler_delete_callback(call, entry->event);
 		packet_dealloc(entry->packet);
 		comp_header = NULL;
 		free(entry);
 		entry = NULL;
 		found = FOUND_OTHER_1;
-		continue;	    
+		continue;
+	    }
 	}
 	das_insert(tmp, (void*)entry);
     }
@@ -1246,6 +1390,65 @@ mate_e find_mate(call_t *call, packet_t *packet)
     SET_BUFFER(&call_down, tmp);
     return found;
 }
+
+// Flooding-variant mate is a packet whose previous is this packet's target
+mate_e sf_find_mate(call_t *call, packet_t *packet)
+{
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call);
+
+#ifdef LOG_ROUTING
+    PRINT_ROUTING("[RTG] packet at %d from %d looking for mate\n", call->node,
+        header->sender.id);
+#endif
+
+    // <Jordan Debug>
+    //fprintf(stderr, "[RTG] packet at %d from %d looking for mate\n", call->no$
+    //  header->sender.id);                  
+
+    buffer_entry_t* entry = NULL;
+    call_t call_down = CALL_DOWN(call);
+    void *buffer = GET_BUFFER(&call_down), *tmp = das_create();
+    mate_e found = NOT_FOUND;
+
+    das_init_traverse(buffer);
+    while((entry = (buffer_entry_t*)das_pop_FIFO(buffer)) != NULL)
+    {
+        header_t *comp_header = PACKET_HEADER(entry->packet, node_data);
+        // EDIT: direction not considered (Jordan)
+        if(compare_destinations(&comp_header->next_node,  &header->sender) &&
+            compare_destinations(&comp_header->sender, &header->next_node))
+        {
+#ifdef LOG_ROUTING
+            PRINT_ROUTING("[RTG] found mates at %d, deallocating packets\n",
+                call->node);
+#endif
+            //<Jordan Debug>
+            //fprintf(stderr, "[RTG] found mates at %d, deallocating packets\n",
+            //  call->node);
+
+                scheduler_delete_callback(call, entry->event);
+                packet_dealloc(entry->packet);
+                comp_header = NULL;
+                free(entry);
+                entry = NULL;
+                found = FOUND_OTHER_1;
+                continue;
+        }
+        das_insert(tmp, (void*)entry);
+    }
+    //if received packet is no longer needed
+    if(found == FOUND_OTHER_1)
+    {
+        packet_dealloc(packet);
+        packet = NULL;
+        header = NULL;
+    }
+    SET_BUFFER(&call_down, tmp);
+    return found;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 // General Helper Functions
