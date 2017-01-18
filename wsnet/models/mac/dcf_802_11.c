@@ -750,12 +750,13 @@ int get_header_real_size(call_t *c) {
 
 /* ************************************************** */
 /* ************************************************** */
-mac_methods_t methods = {rx, 
+mac_methods_t methods;
+/* = {rx, 
                          tx,
                          set_header, 
                          get_header_size,
                          get_header_real_size};
-
+*/
 
     
     

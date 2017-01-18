@@ -2,7 +2,7 @@
 
 # libtool - Provide generalized library-building support services.
 # Generated automatically by config.status (wsnet) 0.7cvs
-# Libtool was configured on host jadamek10.cs.kent.edu:
+# Libtool was configured on host jadamek1.cs.kent.edu:
 # NOTE: Changes made to this file will be lost: look at ltmain.sh.
 #
 #   Copyright (C) 1996, 1997, 1998, 1999, 2000, 2001, 2003, 2004, 2005,
@@ -237,7 +237,7 @@ hardcode_into_libs=yes
 sys_lib_search_path_spec="/usr/lib/gcc/i686-redhat-linux/4.4.7 /usr/lib /lib"
 
 # Run-time system search path for libraries.
-sys_lib_dlsearch_path_spec="/lib64 /usr/lib64 /lib /usr/lib /usr/lib/atlas /usr/lib/mysql /usr/lib/qt-3.3/lib /usr/lib/vmware-tools/lib/libvmGuestLib.so /usr/lib/vmware-tools/lib/libvmGuestLibJava.so /usr/lib/vmware-tools/lib/libDeployPkg.so /usr/lib/xulrunner "
+sys_lib_dlsearch_path_spec="/lib64 /usr/lib64 /lib /usr/lib /usr/lib/atlas /usr/lib/llvm /usr/lib/mysql /usr/lib/qt-3.3/lib /usr/lib/vmware-tools/lib/libvmGuestLib.so /usr/lib/vmware-tools/lib/libvmGuestLibJava.so /usr/lib/vmware-tools/lib/libDeployPkg.so /usr/lib/xulrunner "
 
 # Whether dlopen is supported.
 dlopen_support=yes
