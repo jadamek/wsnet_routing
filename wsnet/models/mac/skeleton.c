@@ -202,12 +202,13 @@ void rx(call_t *c, packet_t *packet) {
 
 /* ************************************************** */
 /* ************************************************** */
-mac_methods_t methods = {rx, 
+mac_methods_t methods;
+/* = {rx, 
                          tx,
                          set_header, 
                          get_header_size,
                          get_header_real_size};
-
+*/
 
     
     
