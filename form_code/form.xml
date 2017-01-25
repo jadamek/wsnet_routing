@@ -239,7 +239,53 @@
 -->
 
 <!--
+<entity name="routing" library="routing_spg">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_gd">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_bfs">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_bfs_cds">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_err">
+  <init loss_rate="" />
+</entity>
+-->
+
+<!--
 <entity name="routing" library="routing_gcfr">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_dijkstra">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_geo_dijkstra">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_bfs">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_cds">
 </entity>
 -->
 
@@ -253,6 +299,12 @@
 <!--
 <entity name="application" library="application_unicast">
   <init source="" destination=""/>
+</entity>
+-->
+
+<!--
+<entity name="application" library="application_geocast">
+    <init source="" x_pos="" y_pos="" z_pos="" length="" radius=""/>
 </entity>
 -->
 
