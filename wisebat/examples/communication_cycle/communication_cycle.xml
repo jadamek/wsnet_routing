@@ -1,0 +1,95 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="2" duration="6000s" x="5" y="5" z="0"/>
+
+
+<!-- == Entities ====================================================== -->
+
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="propagation" library="propagation_rayleigh_fading" >
+</entity>
+
+<entity name="interf" library="interferences_orthogonal">
+</entity>
+
+<entity name="bpsk" library="modulation_bpsk">
+</entity>
+
+<!-- == RADIO and ANTENNA ============================================ -->
+
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal" >
+</entity>
+
+<entity name="radio" library="radio_half1d" >
+  <default dBm="0" modulation="bpsk"/>
+</entity>
+
+<!-- == MAC ===================================================== -->
+
+<entity name="mac" library="mac_dcf_802_11" >
+</entity>
+
+
+<!-- == APPLICATION ===================================================== -->
+
+<entity name="app" library="application_communication_cycle" >
+</entity>
+
+
+<!-- == MOBILITY ===================================================== -->
+
+<entity name="static" library="mobility_static" >
+  <default x="random" y="random" z="random"/>
+</entity>
+
+<entity name="battery" library="energy_wisebat" >
+  <init energy="25" voltage-characteristic="[0:3,20:2.8,25:1]" capacity-characteristic="[0.3:25,1:20,4:15]" internal-resistance="[0.3:25,1:20,4:15]" cut-off-voltage="2"/>
+</entity>
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+<propagation entity="propagation" range="0"/>
+<interferences entity="interf"/>
+<modulation entity="bpsk"/>
+</environment>
+
+
+<!-- == Bundle ===================================================== -->
+
+<bundle name="sensor" worldsens="false" default="true" birth="0">
+  <mobility entity="static"/>
+  <energy entity="battery"/>
+
+  <antenna entity="omnidirectionnal">
+    <up entity="radio"/>
+  </antenna>
+
+  <with entity="radio">
+    <up entity="mac"/>
+    <down entity="omnidirectionnal"/>
+  </with>
+
+  <with entity="mac">
+    <up entity="app"/>
+    <down entity="radio"/>
+  </with>
+
+
+  <with entity="app">
+    <down entity="mac"/>
+  </with>
+</bundle>
+
+<!-- == Nodes ===================================================== -->
+
+<node id="0" as="sensor">
+  <for entity="battery" log="sender.wisebat.log" log-level="3" energy="7" />
+</node>
+
+</worldsens>

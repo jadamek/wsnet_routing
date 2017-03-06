@@ -35,7 +35,7 @@ PATH: /usr/local/sbin
 PATH: /usr/sbin
 PATH: /sbin
 PATH: /home/jadamek/bin
-PATH: /usr/local/wsnet-2.0/bin/
+PATH: /usr/local/wsnet-2.0/bin
 
 
 ## ----------- ##
@@ -287,7 +287,7 @@ configure:10276: checking how to hardcode library paths into programs
 configure:10301: result: immediate
 configure:10424: checking for shl_load
 configure:10480: gcc -o conftest -O2 -I/usr/local/wsnet-2.0    conftest.c  >&5
-/tmp/cccU7qCS.o: In function `main':
+/tmp/ccxWCPlq.o: In function `main':
 conftest.c:(.text+0x7): undefined reference to `shl_load'
 collect2: ld returned 1 exit status
 configure:10487: $? = 1
@@ -397,7 +397,7 @@ configure: failed program was:
 configure:10575: result: no
 configure:10580: checking for dlopen
 configure:10636: gcc -o conftest -O2 -I/usr/local/wsnet-2.0    conftest.c  >&5
-/tmp/cchAz4oY.o: In function `main':
+/tmp/ccCTtE8v.o: In function `main':
 conftest.c:(.text+0x7): undefined reference to `dlopen'
 collect2: ld returned 1 exit status
 configure:10643: $? = 1
@@ -644,15 +644,15 @@ lt_cv_sys_max_cmd_len=1966080
 ## Output variables. ##
 ## ----------------- ##
 
-ACLOCAL='${SHELL} /home/jadamek/WSNet/combined/missing --run aclocal-1.11'
+ACLOCAL='${SHELL} /home/jadamek/WSNet/sfspg/missing --run aclocal-1.11'
 AMDEPBACKSLASH='\'
 AMDEP_FALSE='#'
 AMDEP_TRUE=''
-AMTAR='${SHELL} /home/jadamek/WSNet/combined/missing --run tar'
+AMTAR='${SHELL} /home/jadamek/WSNet/sfspg/missing --run tar'
 AR='ar'
-AUTOCONF='${SHELL} /home/jadamek/WSNet/combined/missing --run autoconf'
-AUTOHEADER='${SHELL} /home/jadamek/WSNet/combined/missing --run autoheader'
-AUTOMAKE='${SHELL} /home/jadamek/WSNet/combined/missing --run automake-1.11'
+AUTOCONF='${SHELL} /home/jadamek/WSNet/sfspg/missing --run autoconf'
+AUTOHEADER='${SHELL} /home/jadamek/WSNet/sfspg/missing --run autoheader'
+AUTOMAKE='${SHELL} /home/jadamek/WSNet/sfspg/missing --run automake-1.11'
 AWK='gawk'
 CC='gcc'
 CCDEPMODE='depmode=gcc3'
@@ -685,7 +685,7 @@ LIBTOOL='$(SHELL) $(top_builddir)/libtool'
 LIPO=''
 LN_S='ln -s'
 LTLIBOBJS=''
-MAKEINFO='${SHELL} /home/jadamek/WSNet/combined/missing --run makeinfo'
+MAKEINFO='${SHELL} /home/jadamek/WSNet/sfspg/missing --run makeinfo'
 MKDIR_P='/bin/mkdir -p'
 NM='/usr/bin/nm -B'
 NMEDIT=''
@@ -740,7 +740,7 @@ host_vendor='pc'
 htmldir='${docdir}'
 includedir='${prefix}/include'
 infodir='${datarootdir}/info'
-install_sh='${SHELL} /home/jadamek/WSNet/combined/install-sh'
+install_sh='${SHELL} /home/jadamek/WSNet/sfspg/install-sh'
 libdir='${exec_prefix}/lib'
 libexecdir='${exec_prefix}/libexec'
 localedir='${datarootdir}/locale'
