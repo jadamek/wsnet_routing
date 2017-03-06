@@ -151,9 +151,11 @@ int destroy(call_t *call)
     fprintf(stderr, "  Number of targets: %d\n", entity_data->num_targets);
     fprintf(stderr, "  num messages sent: %d\n", entity_data->data_tx);
     fprintf(stderr, "  num messages received: %d\n", entity_data->data_rx);
-    fprintf(stderr, "  message delivery rate: %f\n",
+    fprintf(stderr, "  message delivery rate: %f",
 	(double)entity_data->data_rx / (double)entity_data->data_tx);
-    fprintf(stderr, "  latency: %lld nanoseconds\n", entity_data->latency);
+    if(entity_data->data_rx < entity_data->num_targets || entity_data->data_rx < 1)
+        fprintf(stderr, " <failed>");
+    fprintf(stderr, "\n  latency: %lld nanoseconds\n", entity_data->latency);
 
     if((results = fopen(name, "a")) == NULL)
 	fprintf(stderr, "[ERR] Couldn't open file: results.txt\n");

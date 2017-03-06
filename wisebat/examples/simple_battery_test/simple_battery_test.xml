@@ -1,0 +1,87 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<worldsens xmlns="http://worldsens.citi.insa-lyon.fr">
+
+
+<!-- == Worldsens ===================================================== -->
+<simulation nodes="2" duration="30000s" x="1" y="1" z="0"/>
+
+
+<!-- == Entities ====================================================== -->
+
+
+<!-- == PROPAGATION, INTERFERENCES and MODULATION ===================== -->
+<entity name="range" library="propagation_range" >
+  <init  range="30"/>
+</entity>
+
+<entity name="interf" library="interferences_orthogonal">
+</entity>
+
+<entity name="none" library="modulation_none">
+</entity>
+<entity name="oqpsk" library="modulation_oqpsk">
+</entity>
+
+<!-- == ANTENNA ============================================ -->
+
+<entity name="omnidirectionnal" library="antenna_omnidirectionnal" >
+  <default loss="0" angle-xy="random" angle-z="random"/>
+</entity>
+
+<!-- == APPLICATION ===================================================== -->
+
+<entity name="app" library="application_battery_test" >
+  <default on-period="15ms" off-period="200ms" start="2ms" current="20"/>
+</entity>
+
+
+<!-- == MOBILITY ===================================================== -->
+<entity name="static" library="mobility_static" >
+  <default x="random" y="random" z="random"/>
+</entity>
+
+
+<!-- == BATTERY ======================================================== -->
+
+<entity name="battery" library="energy_wisebat" >
+  <init energy="25" voltage-characteristic="[0:3,20:2.8,25:1]" capacity-characteristic="[0.3:25,1:20,4:15]" internal-resistance="[0.3:25,1:20,4:15]" cut-off-voltage="1.5"/>
+</entity>
+
+
+
+<!-- == Environment ===================================================== -->
+<environment>
+<propagation entity="range" range="30"/>
+<interferences entity="interf"/>
+<modulation entity="none"/>
+</environment>
+
+
+<!-- == Bundle ===================================================== -->
+
+<bundle name="sensor" worldsens="false" default="true" birth="0">
+  <mobility entity="static"/>
+
+  <energy entity="battery"/>
+
+  <antenna entity="omnidirectionnal">
+    <up entity="app"/>
+  </antenna>
+
+  <with entity="app">
+    <down entity="omnidirectionnal"/>
+  </with>
+</bundle>
+
+<!-- == Nodes ===================================================== -->
+
+<node id="0" as="sensor">
+  <for entity="battery" log="example.0.wisebat.log" log-level="1" log-interval="30s"/>
+  <for entity="app" on-period="15ms" off-period="200ms" start="2ms" current="24"/>
+</node>
+<node id="1" as="sensor">
+  <for entity="battery" log="example.1.wisebat.log" log-level="3" />
+  <for entity="app" on-period="150ms" off-period="2000ms" start="2ms" current="24"/>
+</node>
+</worldsens>
+

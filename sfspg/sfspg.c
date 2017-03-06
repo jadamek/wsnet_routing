@@ -239,7 +239,7 @@ int destroy(call_t *call)
     if((results = fopen(name, "a")) == NULL)
 	fprintf(stderr, "[ERR] Couldn't open file: results.txt\n");
     else
-	fprintf(results, "%d\n", entity_data->total_num_hops);
+	fprintf(results, "%d\t%d\n", entity_data->total_num_hops, entity_data->num_packets);
 
     free(entity_data);
     entity_data = NULL;

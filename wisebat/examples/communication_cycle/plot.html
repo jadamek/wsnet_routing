@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html>
+<meta charset="utf-8">
+<style>
+
+body {
+  font: 10px sans-serif;
+}
+
+.axis path,
+.axis line {
+  fill: none;
+  stroke: #000;
+  shape-rendering: crispEdges;
+}
+
+.x.axis path {
+  display: none;
+}
+
+.line {
+  fill: none;
+  stroke: steelblue;
+  stroke-width: 1.5px;
+}
+.legends
+{
+  padding:10px;
+  background-color: #eeeeee;
+  border-radius: 3px;
+  border:1px solid #cccccc;
+  position: absolute;
+}
+.legends .selected
+{
+  opacity: 1;
+}
+.legends div
+{
+  opacity: 0.6;
+  cursor: pointer;
+}
+</style>
+<body>
+<div class='legends'>
+</div>
+<script src="http://d3js.org/d3.v3.js"></script>
+<script src="http://code.jquery.com/jquery-2.1.1.min.js"></script>
+<script type="text/javascript">
+  (function($) {
+    $.fn.drags = function(opt) {
+
+        opt = $.extend({handle:"",cursor:"move"}, opt);
+
+        if(opt.handle === "") {
+            var $el = this;
+        } else {
+            var $el = this.find(opt.handle);
+        }
+
+        return $el.css('cursor', opt.cursor).on("mousedown", function(e) {
+            if(opt.handle === "") {
+                var $drag = $(this).addClass('draggable');
+            } else {
+                var $drag = $(this).addClass('active-handle').parent().addClass('draggable');
+            }
+            var z_idx = $drag.css('z-index'),
+                drg_h = $drag.outerHeight(),
+                drg_w = $drag.outerWidth(),
+                pos_y = $drag.offset().top + drg_h - e.pageY,
+                pos_x = $drag.offset().left + drg_w - e.pageX;
+            $drag.css('z-index', 1000).parents().on("mousemove", function(e) {
+                $('.draggable').offset({
+                    top:e.pageY + pos_y - drg_h,
+                    left:e.pageX + pos_x - drg_w
+                }).on("mouseup", function() {
+                    $(this).removeClass('draggable').css('z-index', z_idx);
+                });
+            });
+            e.preventDefault(); // disable selection
+        }).on("mouseup", function() {
+            if(opt.handle === "") {
+                $(this).removeClass('draggable');
+            } else {
+                $(this).removeClass('active-handle').parent().removeClass('draggable');
+            }
+        });
+
+    }
+})(jQuery);
+</script>
+
+<script type="text/javascript">
+  
+  $('.legends').drags();
+  function initLegend()
+  {
+    function hideLineCallback(legend, line)
+    {
+      return function()
+      {
+        $(line).toggle();
+        $(legend).toggleClass('selected');
+      }
+    }
+    $('.line').each(function(d)
+    {
+      var l = $('<div class="selected legend-line">'+$(this).attr('data-label')+'</div>');
+      $('.legends').append(l);
+      l.on('click', hideLineCallback(l, this));
+    })
+  }
+
+var params = {};
+params["current_of"] = []
+window.location.search.substr(1).split('&').forEach(function(part) {
+
+  var keyval = part.split('=');
+  if(keyval[0] == "current_of")
+  {
+    params[keyval[0]] = keyval[1].split(',');
+  }
+  else
+  {
+    params[keyval[0]] = keyval[1];
+  }
+});
+
+
+var startTime = 0;
+var endTime = -1;
+
+if(params.startTime)
+{
+  startTime = params.startTime
+}
+if(params.endTime)
+{
+  endTime = params.endTime
+}
+
+var filename = params.file;
+if(!filename)
+{
+  alert('entrer le nom du fichier dans l\'url, apres ?');
+}
+else{
+
+
+var margin = {top: 20, right: 80, bottom: 30, left: 50},
+    width = 960 - margin.left - margin.right,
+    height = 500 - margin.top - margin.bottom;
+
+var x = d3.scale.linear()
+    .range([0, width]);
+
+var y0 = d3.scale.linear().range([height, 0]);
+var y1 = d3.scale.linear().range([height, 0]);
+var y2 = d3.scale.linear().range([height, 0]);
+
+var color = d3.scale.category10();
+
+var xAxis = d3.svg.axis()
+    .scale(x)
+    .tickFormat(function(seconds){
+      var numdays = Math.floor((seconds) / 86400); 
+      var numhours = Math.floor(((seconds % 31536000) % 86400) / 3600);
+      var numminutes = Math.floor((((seconds % 31536000) % 86400) % 3600) / 60);
+      var numseconds = (((seconds % 31536000) % 86400) % 3600) % 60;
+      numhours = (numhours>9?""+numhours:"0"+numhours);
+      numminutes = (numminutes>9?""+numminutes:"0"+numminutes);
+      numseconds = (numseconds>9?""+numseconds:"0"+numseconds);
+      if(numdays)
+      {
+        return numdays + "d " + numhours + ":" + numminutes + ":" + numseconds;
+      }
+      return numhours + ":" + numminutes + ":" + numseconds;
+
+    })
+    .orient("bottom");
+
+var yAxisLeft = d3.svg.axis().scale(y0)     //  <==  Add in 'Left' and 'y0'
+    .orient("left").ticks(5);
+
+var yAxisRight = d3.svg.axis().scale(y1)  // This is the new declaration for the 'Right', 'y1'
+    .orient("right").ticks(5);           // and includes orientation of the axis to the right.
+
+var yAxisRightV = d3.svg.axis().scale(y2)  // This is the new declaration for the 'Right', 'y1'
+    .orient("left").ticks(5);           // and includes orientation of the axis to the right.
+
+var line_consumption = d3.svg.line()
+    .interpolate("step-after")
+    //.interpolate("step-before")
+    //.interpolate("linear")
+    .x(function(d) { return x(d.time); })
+    .y(function(d) { return y0(d.value); });
+var line_energy = d3.svg.line()
+    //.interpolate("step-after")
+    .interpolate("linear")
+    .x(function(d) { return x(d.time); })
+    .y(function(d) { return y1(d.value); });
+
+var line_voltage = d3.svg.line()
+    //.interpolate("step-before")
+    .interpolate("linear")
+    .x(function(d) { return x(d.time); })
+    .y(function(d) { return y2(d.value); });
+
+var svg = d3.select("body").append("svg")
+    .attr("width", width + margin.left + margin.right)
+    .attr("height", height + margin.top + margin.bottom)
+    .attr("class", filename)
+  .append("g")
+    .attr("transform", "translate(" + margin.left + "," + margin.top + ")");
+
+function simplifyArray(arr)
+{
+  return arr;
+
+  var binSize = parseInt(arr.length/500)
+  ret = []
+  for(var i = 0; i < arr.length; )
+  {
+    var m = arr[i];
+    for(var j = 0; i < arr.length && j < binSize; ++i, ++j)
+    {
+      //if(m.value < arr[i].value)
+      {
+      //  m = arr[i];
+      }
+
+    }
+    ret.push(m);
+  }
+  return ret;
+}
+
+
+var dsv = d3.dsv(" ", "text/plain");
+dsv(filename, function(error, data) {
+  console.log('start processing');
+  data.forEach(function(d){ d.time /= 1000000000; })
+
+  var data_current = {};
+  params['current_of'].forEach(function(component){
+    data_current[component] = data.filter(function(o) { return o.time > startTime && (endTime < 0 || o.time < endTime) && o.type == "consumption_"+component; });
+  });
+
+
+  data_energy = data.filter(function(o) { return o.time >= startTime && (endTime < 0 || o.time <= endTime) &&  o.type == "residual"; });
+  data_voltage = data.filter(function(o) { return o.time >= startTime && (endTime < 0 || o.time <= endTime) &&  o.type == "voltage"; });
+  data_voltage_min = data.filter(function(o) { return o.time >= startTime && (endTime < 0 || o.time <= endTime) &&  o.type == "voltage_min"; });
+  data_voltage_max = data.filter(function(o) { return o.time >= startTime && (endTime < 0 || o.time <= endTime) &&  o.type == "voltage_max"; });
+  
+  data_energy = simplifyArray(data_energy)
+  data_voltage = simplifyArray(data_voltage)
+
+
+  color.domain(params['current_of']);
+  var xdom = d3.extent(data_energy, function(d) { return d.time; });
+  xdom[0] = startTime;
+  if(endTime > 0)
+  {
+    xdom[1] = endTime;
+  }
+  x.domain(xdom);
+
+  y2.domain([
+    0,
+    3.5
+  ]);
+  y0.domain([
+    0,
+    26
+  ]);
+  y1.domain([
+    d3.min(data_energy, function(c) { return parseFloat(c.value); }),
+    d3.max(data_energy, function(c) { return parseFloat(c.value); })
+  ]);
+
+  svg.append("g")
+      .attr("class", "x axis")
+      .attr("transform", "translate(0," + height + ")")
+      .call(xAxis);
+
+    svg.append("g")
+        .attr("class", "y axis")
+        .style("fill", "steelblue")
+        .call(yAxisLeft);
+
+    svg.append("g")
+        .attr("class", "y axis")
+        .attr("transform", "translate(" + width + " ,0)")
+        .style("fill", "red")
+        .call(yAxisRight);
+    svg.append("g")
+        .attr("class", "y axis")
+        .attr("transform", "translate(-25 ,0)")
+        .style("fill", "black")
+        .call(yAxisRightV);
+
+ /* svg.append("g")
+      .attr("class", "y axis")
+      .call(yAxisLeft)
+    .append("text")
+      .attr("transform", "rotate(-90)")
+      .attr("y", 6)
+      .attr("dy", ".71em")
+      .style("text-anchor", "end")
+      .text("mA");
+  svg.append("g")
+      .attr("class", "y axis")
+      .call(yAxisRight)
+    .append("text")
+      .attr("transform", "rotate(-90)")
+      .attr("y", 6)
+      .attr("dy", ".71em")
+      .style("text-anchor", "end")
+      .text("mAh");*/
+
+  params['current_of'].forEach(function(component){
+      svg.append("svg:path")
+      .attr("class", "line line-consumption")
+      .attr("data-label", component)
+      .attr("d", line_consumption(data_current[component]))
+      .style("stroke", color(component));
+    });
+
+      svg.append("svg:path")
+      .attr("class", "line")
+      .attr("data-label", "residual energy")
+      .attr("d", line_energy(data_energy))
+      .style("stroke", "red");
+
+// VOLTAGE //////////////////////////////////////
+      svg.append("svg:path")
+      .attr("class", "line line-voltage")
+      .attr("data-label", "voltage")
+      .attr("d", line_voltage(data_voltage))
+      .style("stroke", "black");
+      svg.append("svg:path")
+      .attr("class", "line line-voltage")
+      .attr("data-label", "voltage")
+      .attr("d", line_voltage(data_voltage_min))
+      .style("stroke", "black")
+      .style("stroke-dasharray", ("3, 3"));
+      svg.append("svg:path")
+      .attr("class", "line line-voltage")
+      .attr("data-label", "voltage")
+      .attr("d", line_voltage(data_voltage_max))
+      .style("stroke", "black")
+      .style("stroke-dasharray", ("3, 3"));
+/////////////////////////////////////////////////
+
+      initLegend();
+      console.log('start displaying');
+/*
+  var city = svg.selectAll(".city")
+      .data(data)
+    .enter().append("g")
+      .attr("class", "city");
+
+  city.append("path")
+      .attr("class", "line")
+      .attr("d", function(d) { return line_consumption(d.values); })
+      .style("stroke", function(d) { return color(d.name); });
+*/
+/*
+ var energy_l = svg.selectAll(".city")
+      .data(data_energy)
+    .enter().append("g")
+      .attr("class", "city");
+  energy_l.append("path")
+      .attr("class", "line")
+      .attr("d", function(d) { return line_energy(d.values); })
+      .style("stroke", function(d) { return color(d.name); });
+*/
+  return;
+});
+
+}
+
+</script>
+<a class="bookmarklet" href="javascript:javascript: (function () { var e = document.createElement('script'); if (window.location.protocol === 'https:') { e.setAttribute('src', 'https://raw.github.com/NYTimes/svg-crowbar/gh-pages/svg-crowbar.js'); } else { e.setAttribute('src', 'http://nytimes.github.com/svg-crowbar/svg-crowbar.js'); } e.setAttribute('class', 'svg-crowbar'); document.body.appendChild(e); })();">Save</a>
+</body>

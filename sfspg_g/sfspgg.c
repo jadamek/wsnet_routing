@@ -211,7 +211,13 @@ int init(call_t *call, void* params)
     if(access("topo.data", F_OK) != ERROR)
 	remove("topo.data");
 #endif
+
+#ifdef LOG_TOPO_G
+    //topo_post_axes(call);
+#endif
+
     return 0;
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -242,7 +248,7 @@ int destroy(call_t *call)
     if((results = fopen(name, "a")) == NULL)
 	fprintf(stderr, "[ERR] Couldn't open file: results.txt\n");
     else
-	fprintf(results, "%d\n", entity_data->total_num_hops);
+	fprintf(results, "%d\t%d\n", entity_data->total_num_hops, entity_data->num_packets);
 
     free(entity_data);
     entity_data = NULL;
@@ -293,11 +299,13 @@ int setnode(call_t *call, void* params)
     {
     }
     */
-
+#ifdef LOG_TOPO
+    topo_post_data(call);
+#endif
     set_node_private_data(call, node_data);
 
 #ifdef LOG_TOPO
-    topo_post_data(call);
+    //topo_post_nodes(call);
 #endif
 
     return 0;
@@ -317,7 +325,7 @@ int unsetnode(call_t *call)
 #ifdef LOG_GG
     gg_post_nodes(call);
 #endif
-#ifdef LOG_TOPO_G
+#ifdef LOG_TOPO
     topo_post_nodes(call);
 #endif
 
@@ -557,20 +565,59 @@ void tx(call_t *call, packet_t *packet)
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
 
+#ifdef LOG_ROUTING
+
+    char* dir;
+
+    switch(header->direction){
+	case BOTH:
+            dir = "B";
+	    break;
+        case TRAVERSE_L:
+            dir = "L";
+            break;
+        case TRAVERSE_R:
+            dir = "R";
+            break;
+        case NO_DIR:
+            dir = "N";
+            break;
+        default:
+            dir = "?";
+    }
+
+    fprintf(stderr, "[RTG] Packet <C:%d, P:%d, D:%s>.\n", my_pos.id, header->sender.id, dir);
+
+#endif
+    
     // Message in region are FLOODING type, otherwise FACE type
     if(check_in_geocast(&header->dest, &my_pos)){
+
+#ifdef LOG_ROUTING
+//    fprintf(stderr, "[RTG] Flooding packet at %d.\n", my_pos.id);
+#endif
+
 	sf_spray_packets(call, packet);
     }
     //traversing first face
     else if(header->direction == NO_DIR){
-        //fprintf(stderr, "[RTG] Attempting greedy forwarding ...\n");	
-	//if(!greedy_forward(call, packet)){
-            fprintf(stderr, "[RTG] First time face routing.\n");
+        
+	if(!greedy_forward(call, packet)){
+
+#ifdef LOG_ROUTING
+            fprintf(stderr, "[RTG] First time face routing at <%d>.\n", my_pos.id);
+#endif
+
+	    header->src = my_pos;
             traverse_first_face(call, packet);
-	//}
+	}
     }
     else{
-        fprintf(stderr, "[RTG] Common forwarding ...\n");	        
+
+#ifdef LOG_ROUTING
+//        fprintf(stderr, "[RTG] Common forwarding ...\n");	        
+#endif
+
 	forward(call, packet);
     }
 //getchar();
@@ -828,7 +875,8 @@ void traverse_first_face(call_t *call, packet_t *packet)
     header->direction = TRAVERSE_R;
     header->sender = my_pos;
     //if already in geocats region, spray packets
-    if(check_in_geocast(&header->dest, &my_pos))
+    if(
+check_in_geocast(&header->dest, &my_pos))
     {
 #ifdef LOG_ROUTING
 	PRINT_ROUTING("[RTG] Start routing, first node in geocast region\n");
@@ -988,51 +1036,51 @@ bool greedy_forward(call_t *call, packet_t *packet)
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
 
-    // <Jordan Debug>
-    //fprintf(stderr, "[RTG] Splitting packets at <%d> with previous <%d>\n", m$
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] Greedy routing at <%d>.", my_pos.id);
+#endif
 
-    //send a packet to every other neighbor than previous
+    //send a packet to the neighbor whose distance to the center of the geocast
+    //area is minimal.
+
     destination_t *gg_nbr = NULL;
-    destination_t *local_min = &my_pos;
-    double min = distance(&my_pos.position, &header->dest.position);
-
     int i, size = das_getsize(node_data->gg_list);
-
-    // No neighbors, cannot deliver
-    if(size < 1){
-        packet_dealloc(packet);
-        packet = NULL;
-        header = NULL;
-
-        return true;
-    }              
-
     das_init_traverse(node_data->gg_list);
-    for(i = 0; i < size; ++i)  
-    {
-        gg_nbr = (destination_t*)das_traverse(node_data->gg_list);              
-        // <Jordan Debug>
-        //fprintf(stderr, "[RTG]   Considering destination node <%d>\n", gg_nbr$
-        double d = distance(&gg_nbr->position, &header->dest.position);
-        if(d < min){
-            min = d;
-            local_min = gg_nbr;
-        } 
-    }                 
 
-    if(local_min != &my_pos){
-        fprintf(stderr, "[RTG]   Greedy forwarding to <%d>\n", local_min->id);
-       
+    destination_t *minimum = &my_pos;
+    double neighbor_distance, min_distance = distance(&my_pos.position, &header->dest.position);
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG]   Region center is located at (%f,%f), and current node at (%f,%f); distance of %f.\n", header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
+#endif
+
+    for(i = 0; i < size; ++i)
+    {
+        gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
+	neighbor_distance = distance(&gg_nbr->position, &header->dest.position);
+
+	if(check_in_geocast(&header->dest, gg_nbr)) return false;
+
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the region center.\n", gg_nbr->id, neighbor_distance);
+#endif
+
+	if(neighbor_distance < min_distance){
+	    minimum = gg_nbr;
+	    min_distance = neighbor_distance;
+        }
+    }
+
+    if(minimum != &my_pos){
         header->sender = my_pos;
-        header->next_node = *local_min;
+        header->next_node = *minimum;
+        header->direction = NO_DIR;
         if(set_mac_header_tx(call, packet) == ERROR)
             fprintf(stderr, "[ERR] Can't route packet\n");
 
-        // Successfully found and forwarded to a greedy neighbor
         return true;
     }
 
-    // Message reached a local minimum
     return false;
 }
 
