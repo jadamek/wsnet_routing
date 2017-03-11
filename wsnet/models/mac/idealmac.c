@@ -122,9 +122,12 @@ int setnode(call_t *c, void *params) {
 int unsetnode(call_t *c) {
     struct nodedata *nodedata = get_node_private_data(c);
 
-    packet_t *packet;
-    while ((packet = (packet_t *) das_pop(nodedata->buffer)) != NULL)
-        packet_dealloc(packet);
+    buffer_entry_t *buff_ent;
+    while ((buff_ent = (buffer_entry_t*)das_pop(nodedata->buffer)) != NULL)
+    {
+        packet_dealloc(buff_ent->packet);
+	free(buff_ent);
+    }
 
     das_destroy(nodedata->buffer);
 
