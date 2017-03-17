@@ -31,10 +31,13 @@ model_t model =
 #define EMPTY_DESTINATION {-2, {-1, -1, -1}}
 
 // Data message interval of 1 second
-static const int DMI = 1000000000U;
+static const double ONE_SECOND = 1000000000.0;
+static const double ONE_HOUR = 3600000000000.0;
+static const double DMI = 1000000000.0 * 500;
+static const double FLICKER = 1000000000.0;
 
 // Total messages sent throughought scenario
-static const int BOUND = 5;
+static const int BOUND = 50;
 
 static int ROUND = -1;
 
@@ -79,14 +82,14 @@ int init(call_t *call, void *params);
 //destroy
 int destroy(call_t* call);
 
-int call_back(call_t *call, void *args);
+bool compare_destinations(destination_t *dest1, destination_t *dest2);
 int tx(call_t *call, void *args);
 
-int compare_destinations(destination_t *dest1, destination_t *dest2);
+int call_back(call_t *call, void *args);
 double cpu_consume(call_t* c, component_context_t context, component_mode_t mode);
 double radio_consume(call_t* c, component_context_t context, component_mode_t mode);
-int power_manager_after_update(call_t* c, component_context_t* context, void* arg);
-int power_manager_before_consume(call_t* c, component_context_t* context, void* arg);
+int flicker_cpu_on(call_t *call, void *args);
+int flicker_cpu_off(call_t *call, void *args);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Init
@@ -103,12 +106,14 @@ int init(call_t *call, void *params)
     entity_data->num_targets = 0;
     entity_data->data_tx = 0;
     entity_data->data_rx = 0;
+
     entity_data->round_tx = (int*)malloc(BOUND * sizeof(int));
     entity_data->round_rx = (int*)malloc(BOUND * sizeof(int));
     for(i = 0; i < BOUND; i++){
 	 entity_data->round_tx[i] = 0;
 	 entity_data->round_rx[i] = 0;
     }
+
     entity_data->latency = 0;
     entity_data->source = empty_destination;
     entity_data->destination = empty_destination;
@@ -236,6 +241,23 @@ int unsetnode(call_t *call)
     return 0;
 }
 
+int print(call_t *c, void *args)
+{
+    if(!is_node_alive(c->node))
+    {
+        printf("%d Died!\n", c->node);
+        return -1;
+    }
+    component_context_t context;
+    if(IOCTL_OK != battery_get_context(c, &context))
+    {
+        return -1;
+    }
+    printf("%d remaining %f voltage %f\n", c->node, battery_remaining(c), context.voltage);
+    scheduler_add_callback(get_time()+ONE_SECOND * 1000, c, print, NULL);
+    return 0;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Bootstrap
 
@@ -247,8 +269,8 @@ int bootstrap(call_t *call)
     entityid_t *down = get_entity_links_down(call);
     node_data->overhead = 0;
 
-if(call->node == 0)
-fprintf(stderr, "[DBG] source: %d, destination: %f, %f, %f\n", entity_data->source.id, entity_data->destination.position.x, entity_data->destination.position.y, entity_data->destination.position.z);
+    if(call->node == 0)
+        fprintf(stderr, "[DBG] source: %d, destination: %f, %f, %f\n", entity_data->source.id, entity_data->destination.position.x, entity_data->destination.position.y, entity_data->destination.position.z);
 
     //get number of targets
     if(call->node == 0)
@@ -279,22 +301,34 @@ fprintf(stderr, "[DBG] source: %d, destination: %f, %f, %f\n", entity_data->sour
 	    get_entity_type(&call_down) == MODELTYPE_MAC)
 	    node_data->overhead += GET_HEADER_SIZE(&call_down);
     }
-    
+
+    node_data->cpu_component.name = "cpu";
+    node_data->cpu_component.consume = cpu_consume;
+
+    battery_register_component(call, &node_data->cpu_component, MODE_SLEEP);
+
+    battery_set_radio_consumption(call, radio_consume);
+    battery_set_radio_mode(call, MODE_SLEEP);
+
+    /* eventually schedule callback */
+    scheduler_add_callback(DEFAULT_START_TIME, call, flicker_cpu_on, NULL);
+
     if(call->node == entity_data->source.id){
-        for(i = 0; i < BOUND; i++){
-	    scheduler_add_callback(DEFAULT_START_TIME + i * DMI, call, call_back, NULL);
-	}
+        scheduler_add_callback(DEFAULT_START_TIME +ONE_SECOND * 5, call, call_back, NULL);
     }
+
     return 0;
 }
 
 int call_back(call_t *call, void *args)
 {
+
     struct node_data *node_data = get_node_private_data(call);
     struct entity_data *entity_data = get_entity_private_data(call);
     call_t call_down = CALL_DOWN(call);
 
     entity_data->source.position = *get_node_position(entity_data->source.id);
+
     packet_t *packet = packet_create(call, node_data->packet_size +
 	node_data->overhead, -1);
     if(SET_HEADER(&call_down, packet, &(entity_data->destination)) == ERROR)
@@ -305,10 +339,22 @@ int call_back(call_t *call, void *args)
     }
 
     ROUND++;
+    fprintf(stderr, "ROUND %d\n", ROUND);            
 
     entity_data->data_tx++;
     entity_data->round_tx[ROUND]++;
+
+/*
+    component_context_t context;
+    battery_get_context(call, &context);
+
+    fprintf(stderr, "Node %d, V: %f, alive:%d\n", call->node, context.voltage, is_node_alive(call->node));
+*/
     TX(&call_down, packet);
+    
+    if(ROUND < BOUND){
+        scheduler_add_callback(get_time() + DMI, call, call_back, NULL);
+    }
 
     return 0;
 }
@@ -357,10 +403,6 @@ bool compare_destinations(destination_t *dest1, destination_t *dest2)
 // Power Consumption Functions
 double cpu_consume(call_t* c, component_context_t context, component_mode_t mode)
 {
-    if(mode == MODE_SLEEP)
-    {
-        return 0.1;
-    }
     return 10;
 }
 
@@ -368,39 +410,37 @@ double radio_consume(call_t* c, component_context_t context, component_mode_t mo
 {
     if(mode == MODE_SLEEP)
     {
+//        fprintf(stderr, "[Energy] Sleeping radio at %d\n", c->node);
         return 0.1;
     }
     if(mode == MODE_IDLE)
     {
+//        fprintf(stderr, "[Energy] Idle radio at %d\n", c->node);
         return 2;
     }
     if(mode == MODE_RX)
     {
+        fprintf(stderr, "[Energy] RX mode radio at %d\n", c->node);
+
         return 9;
     }
     return 11;
 }
 
-// Change the global consumption
-int power_manager_after_update(call_t* c, component_context_t* context, void* arg)
-{
-    double* current = (double*)arg;
-    if(*current < 0.02)
-    {
-        *current/=0.96;
-    }
-    else
-    {
-        *current/=0.99;
-    }
+////////////////////////////////////////////////////////////////////////////////
+// CPU Battery Control Methods
+
+int flicker_cpu_on(call_t *call, void *args) {
+    struct node_data *node_data = get_node_private_data(call);
+    scheduler_add_callback(get_time() + FLICKER, call, flicker_cpu_off, NULL);
+    battery_set_component_mode(call, &node_data->cpu_component, MODE_RUN);
     return 0;
 }
 
-// normalize the voltage
-int power_manager_before_consume(call_t* c, component_context_t* context, void* arg)
-{
-    //component_t* component = (component_t*)arg;
-    context->voltage = 3;
+int flicker_cpu_off(call_t *call, void *args) {
+    struct node_data *node_data = get_node_private_data(call);
+    scheduler_add_callback(get_time() + FLICKER * 0.5, call, flicker_cpu_on, NULL);
+    battery_set_component_mode(call, &node_data->cpu_component, MODE_SLEEP);
     return 0;
 }
 
