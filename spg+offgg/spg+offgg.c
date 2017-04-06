@@ -224,7 +224,7 @@ int init(call_t *call, void* params)
 
     //initialize entity_data values
     entity_data->scale_postscript = 595.0 / (topo_pos->x + 20);
-    entity_data->scale_postscript = 1700.0 / (topo_pos->x + 20);
+    //entity_data->scale_postscript = 1700.0 / (topo_pos->x + 20);
 #endif
     //save entity private data
     set_entity_private_data(call, entity_data);
@@ -685,7 +685,7 @@ void planarize_graph(call_t *call)
     for(i = 0; i < get_node_count(); ++i)
     {
 	if(i != call->node && distance(get_node_position(call->node),
-	    get_node_position(i)) <= 1)
+	    get_node_position(i)) <= 10)
 	{
 #ifdef LOG_ROUTING
 	    PRINT_ROUTING("[RTG] GG: node %d adds %d to neighbor list\n",
@@ -1193,13 +1193,13 @@ bool check_in_geocast(destination_t *region, destination_t *to_check)
 {
     //TODO:HARD CODED CONSTANTS
     if((int)(to_check->position.x * PRECISION) >=
-	(int)((region->position.x - 1) * PRECISION) &&
+	(int)((region->position.x - 10) * PRECISION) &&
 	(int)(to_check->position.x * PRECISION) <=
-	(int)((region->position.x + 1) * PRECISION) &&
+	(int)((region->position.x + 10) * PRECISION) &&
 	(int)(to_check->position.y * PRECISION) >=
-	(int)((region->position.y - 1) * PRECISION) &&
+	(int)((region->position.y - 10) * PRECISION) &&
 	(int)(to_check->position.y * PRECISION) <=
-	(int)((region->position.y + 1) * PRECISION))
+	(int)((region->position.y + 10) * PRECISION))
 	return true;
     return false;
 }
