@@ -13,7 +13,7 @@ while i < 100:
 	p = Popen(run_cmd , shell=True, stdout=PIPE, stderr=PIPE)
 	out, err = p.communicate()
 
-	if "<failed>" not in out and "<failed>" not in err:
+	if "<failed>" not in out and "<failed>" not in err and "Num reachable targets: 0" not in out and "Num reachable targets: 0" not in err:
 		i += 1
 		print i, "% complete ..."
 
