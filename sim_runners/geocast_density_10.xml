@@ -3,7 +3,7 @@
 
 <!-- Form config file for use with wsnet -->
 <!-- == Worldsens == (simulation settings) ================================= -->
-<simulation nodes="318" duration="20s" x="10" y="10" z="0"/>
+<simulation nodes="318" duration="30s" x="1000" y="1000" z="0"/>
 
 <!-- == Entities == (modules used in simuation ============================= -->
 
@@ -14,11 +14,11 @@
 </entity>
 -->
 
-
+<!--
 <entity name="propagation" library="propagation_range">
-  <init range="1"/>
+  <init range=""/>
 </entity>
-
+-->
 
 <!--
 <entity name="propagation" library="propagation_freespace">
@@ -38,11 +38,11 @@
 </entity>
 -->
 
-<!--
+
 <entity name="propagation" library="propagation_rayleigh_fading">
-  <init propagation="" deviation="" dist0="" pathloss="" frequency=""/>
+  <init propagation="freespace"/>
 </entity>
--->
+
 
 <!--
 <entity name="propagation" library="propagation_itu_indoor">
@@ -57,15 +57,15 @@
 -->
 
 <!-- == Interferences ====================================================== -->
-
+<!--
 <entity name="interferences" library="interferences_none">
 </entity>
+-->
 
 
-<!--
 <entity name="interferences" library="interferences_orthogonal">
 </entity>
--->
+
 
 <!--
 <entity name="interferences" library="interferences_factor">
@@ -74,10 +74,10 @@
 -->
 
 <!-- == Modulation ========================================================= -->
-
+<!--
 <entity name="modulation" library="modulation_none">
 </entity>
-
+-->
 
 <!--
 <entity name="modulation" library="modulation_step">
@@ -85,10 +85,10 @@
 </entity>
 -->
 
-<!--
-<entity name="modulation" library="modulation_bpsk">
+
+<entity name="bpsk" library="modulation_bpsk">
 </entity>
--->
+
 
 <!--
 <entity name="modulation" library="modulation_oqpsk">
@@ -140,16 +140,17 @@
 -->
 
 <!-- == Radio ============================================================== -->
-
-<entity name="radio" library="radio_half1d">
-</entity>
-
-
 <!--
-<entity name="radio" library="radio_802_15_4_868_bpsk">
-  <default sensibility="" channel="" dBm=""/>
+<entity name="radio" library="radio_half1d">
+  <default sensibility="" T_s="" channel="" dBm="" modulation=""/>
 </entity>
 -->
+
+
+<entity name="radio" library="radio_802_15_4_868_bpsk">
+  <default sensibility="-92" dBm="0" />
+</entity>
+
 
 <!--
 <entity name="radio" library="radio_802_15_4_902_bpsk">
@@ -164,11 +165,11 @@
 -->
 
 <!-- == MAC layer ========================================================== -->
-
+<!--
 <entity name="mac" library="mac_idealmac">
-  <init range="1"/>
+  <init range=""/>
 </entity>
-
+-->
 
 <!--
 <entity name="mac" library="mac_dcf_802_11">
@@ -177,11 +178,10 @@
 </entity>
 -->
 
-<!--
+
 <entity name="mac" library="mac_802_15_4_868_bpsk_u_csma_ca">
-  <default cca="" cs="" cca-threshold="" max-csma-backoffs="" min-backoff-exponent="" max-backoff-exponent=""/>
 </entity>
--->
+
 
 <!--
 <entity name="mac" library="mac_802_15_4_902_bpsk_u_csma_ca">
@@ -242,12 +242,51 @@
 -->
 
 <!--
-<entity name="routing" library="routing_sf">
+<entity name="routing" library="routing_spg_gd">
 </entity>
 -->
 
 <!--
-<entity name="routing" library="routing_sf_bfs_cds">
+<entity name="routing" library="routing_spg_bfs">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_bfs_cds">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_err">
+  <init loss_rate="" />
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_cldp">
+  <init loss_rate="" />
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_offgg">
+  <init loss_rate="0" />
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_flooding_offgg">
+  <init loss_rate="0" />
+</entity>
+-->
+
+<entity name="routing" library="routing_sf_offgg">
+  <init loss_rate="0" />
+</entity>
+
+<!--
+<entity name="routing" library="routing_gfg_flooding_offgg">
+  <init loss_rate="0" />
 </entity>
 -->
 
@@ -257,20 +296,29 @@
 -->
 
 <!--
-<entity name="routing" library="routing_sfspg_bfs_cds">
+<entity name="routing" library="routing_gcfr">
 </entity>
 -->
 
 <!--
-<entity name="routing" library="routing_sfspgg">
+<entity name="routing" library="routing_dijkstra">
 </entity>
 -->
 
-
-<entity name="routing" library="routing_sfspg_g_bfs_cds">
+<!--
+<entity name="routing" library="routing_geo_dijkstra">
 </entity>
+-->
 
+<!--
+<entity name="routing" library="routing_bfs">
+</entity>
+-->
 
+<!--
+<entity name="routing" library="routing_cds">
+</entity>
+-->
 
 <!--
 <entity name="routing" library="routing_filestatic">
@@ -279,16 +327,17 @@
 -->
 
 <!-- == Application ======================================================== -->
-
 <!--
 <entity name="application" library="application_unicast">
-  <init source="random" destination="random"/>
+  <init source="" destination=""/>
 </entity>
 -->
 
+
 <entity name="application" library="application_geocast">
-  <init source="" length="2" radius=""/>
+    <init source="random" length="200" />
 </entity>
+
 
 <!--
 <entity name="application" library="application_onesend">
@@ -423,9 +472,9 @@
 
 <!-- == Environment ======================================================== -->
 <environment>
-<propagation entity="propagation" range="1"/>
+<propagation entity="propagation" />
 <interferences entity="interferences"/>
-<modulation entity="modulation"/>
+<modulation entity="bpsk"/>
 <!-- <monitor entity="monitor"/> -->
 <!-- <noise entity="noise"/> -->
 </environment>

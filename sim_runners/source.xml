@@ -3,7 +3,7 @@
 
 <!-- Form config file for use with wsnet -->
 <!-- == Worldsens == (simulation settings) ================================= -->
-<simulation nodes="32" duration="30s" x="100" y="100" z="0"/>
+<simulation nodes="232" duration="30s" x="1000" y="1000" z="0"/>
 
 <!-- == Entities == (modules used in simuation ============================= -->
 
@@ -268,11 +268,27 @@
 </entity>
 -->
 
-
+<!--
 <entity name="routing" library="routing_spg_offgg">
   <init loss_rate="0" />
 </entity>
+-->
 
+<!--
+<entity name="routing" library="routing_flooding_offgg">
+  <init loss_rate="0" />
+</entity>
+-->
+
+<entity name="routing" library="routing_sf_offgg">
+  <init loss_rate="0" />
+</entity>
+
+<!--
+<entity name="routing" library="routing_gfg_flooding_offgg">
+  <init loss_rate="0" />
+</entity>
+-->
 
 <!--
 <entity name="routing" library="routing_sfspg">
@@ -319,7 +335,7 @@
 
 
 <entity name="application" library="application_geocast">
-    <init source="random" length="20" />
+    <init source="random" length="200" />
 </entity>
 
 

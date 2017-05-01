@@ -4,7 +4,7 @@ source = open('source.xml', 'r')
 source_lines = [line for line in source]
 
 for density in range(20):
-	source_lines[5] = '<simulation nodes="%d" duration="30s" x="100" y="100" z="0"/>\n' % (densities[density])
+	source_lines[5] = '<simulation nodes="%d" duration="30s" x="1000" y="1000" z="0"/>\n' % (densities[density])
 	config = open("geocast_density_%d.xml" % (density + 1), 'w')
 	config.writelines(source_lines)
 	config.close()
