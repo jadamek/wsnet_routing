@@ -1,9 +1,9 @@
 ACLOCAL_AMFLAGS=-I m4 
 
-lib_LTLIBRARIES = YOUR_LIBRARY_NAME.la
+lib_LTLIBRARIES = librouting_gmp_offgg.la
 
-YOUR_LIBRARY_NAME_la_CFLAGS = $(CFLAGS) $(GLIB_FLAGS) $(GSL_FLAGS) -Wall
+librouting_gmp_offgg_la_CFLAGS = $(CFLAGS) $(GLIB_FLAGS) $(GSL_FLAGS) -Wall
 
-YOUR_LIBRARY_NAME_la_SOURCES = YOUR_LIBRARY_SOURCES
+librouting_gmp_offgg_la_SOURCES = gmp+off.c
 
-YOUR_LIBRARY_NAME_la_LDFLAGS = -module
+librouting_gmp_offgg_la_LDFLAGS = -module

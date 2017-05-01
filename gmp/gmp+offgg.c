@@ -11,7 +11,7 @@
 #include <stdbool.h>
 
 #include <include/modelutils.h>
-//#define LOG_ROUTING
+#define LOG_ROUTING
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
 
@@ -54,8 +54,8 @@ model_t model =
 //region length (or diameter) in meteres redefined here
 #define REGION_SIZE 200
 
-//target rate
-#define TARGET_RATE
+//value of Pi for steiner geometry
+#define PI 3.14159265
 
 //default addresses
 #define EMPTY_POSITION {-1, -1 -1}
@@ -95,6 +95,16 @@ typedef struct
     nodeid_t prev;
 }visited_node_t;
 
+//Routing tree of multicast targets
+typedef struct tnode
+{
+    destination_t location;
+    struct tnode** children;
+    int child_count;
+    bool isVirtual;
+    bool isActive;
+} tree_node;
+
 //packet information needed for routing
 typedef struct
 {
@@ -108,8 +118,9 @@ typedef struct
     direction_e direction;
     int ttl;
     void *path;
-    int num_targets;
-    destination_t* target_list;
+    int target_count;
+    destination_t** target_list;
+    tree_node* root;
 }header_t;
 
 //Global node data, used for tracking information known to node
@@ -166,12 +177,26 @@ void* get_shortest_path(call_t *call, destination_t *dest);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
 
+//tree functions
+tree_node* build_steiner_tree(destination_t** target_list, int target_count);
+tree_node* generate_real_node(destination_t* target);
+tree_node* generate_virtual_node(position_t position);
+void add_child(tree_node* parent, tree_node* child);
+void remove_child(tree_node* parent, int child_index);
+void print_tree(tree_node* node, int tab);
 
-//tx
-void tx(call_t *call, packet_t *packet);
+//steiner tree functions
+double get_angle_single(position_t a);
+double get_angle_double(position_t a, position_t b);
+double get_angle_triple(position_t a, position_t b, position_t c);
+double get_acute_angle_triple(position_t a, position_t b, position_t c);
+position_t equillateral_third(position_t a, position_t b, position_t c);
+position_t get_intersection_point(position_t a1, position_t a2, position_t b1, position_t b2);	
+tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
+bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check);
 
 //routing functions - cfr/flood
 destination_t next_on_face(call_t *call, destination_t *start,
@@ -188,6 +213,9 @@ bool combine_packets(call_t *call, destination_t *sender,
     destination_t *next_node, direction_e direction);
 bool flooding_packet(call_t *call, packet_t *packet);
 
+//tx
+void tx(call_t *call, packet_t *packet);
+
 //receiving functions
 void rx(call_t *call, packet_t *packet);
 bool packet_lost(call_t *call);
@@ -195,6 +223,7 @@ mate_e find_mate(call_t *call, packet_t *packet);
 mate_e sf_find_mate(call_t *call, packet_t *packet);
 
 //general helper functions
+double absolute_value(double n);
 bool compare_positions(position_t *l, position_t *r);
 bool compare_destinations(destination_t *l, destination_t *r);
 intersection_e check_intersect(call_t *call, destination_t *source,
@@ -231,8 +260,6 @@ int init(call_t *call, void* params)
     entity_data->num_packets = 1;
     entity_data->loss_rate = 0;
     entity_data->num_reachable = 0;
-    entity_data->num_targets = 0;
-    entity_data->target_list = 0;
 
     das_init_traverse(params);
     while((param = (param_t*)das_traverse(params)) != NULL)
@@ -449,10 +476,22 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->direction = NO_DIR;
     header->ttl = DEFAULT_TTL;
     header->path = NULL;
-    header->target_count = dest.id;
-    header->target_list = malloc(sizeof(destination_t) * target_count);
-    for(int i = 0; i < header->target_count; i++)
-	header->target_list[i] = {1, {0.50, 0.50}};
+    header->target_count = dest->id;
+    header->target_list = malloc(sizeof(destination_t*) * header->target_count);
+
+    // Generate target list
+    int i = 0;
+    destination_t* tmp = 0;
+
+    for(i = 0; i < header->target_count; i++){
+	tmp = NEW(destination_t);
+	tmp->id = i;
+	tmp->position = *get_node_position(i);
+
+	header->target_list[i] = tmp;
+    }
+
+    header->root = build_steiner_tree(header->target_list, header->target_count);
 
     if(compare_destinations(&header->dest, &no_dest))
     {
@@ -997,7 +1036,7 @@ void tx(call_t *call, packet_t *packet)
         fprintf(stderr, "[RTG] GMP routing packet at %d\n", call->node);
 #endif
         forward(call, packet);
-    }
+    
 
 //getchar();
     return;
@@ -1005,7 +1044,7 @@ void tx(call_t *call, packet_t *packet)
 
 
 ////////////////////////////////////////////////////////////////////////////////
-// Routing Functions
+// Routing Functions - GMP
 
 //basic packet forwarding
 void forward(call_t *call, packet_t *packet)
@@ -1015,13 +1054,315 @@ void forward(call_t *call, packet_t *packet)
     destination_t my_pos = THIS_DESTINATION(call);
 
 #ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] target count: %d\n", header->target_count);
-	    
-//	    fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
+    fprintf(stderr, "[RTG] target list(%d):\n", header->target_count);
+    int i;
+    for(i = 0; i < header->target_count; i++){
+	fprintf(stderr, "[RTG]   %d <%f, %f>\n", header->target_list[i]->id, header->target_list[i]->position.x, header->target_list[i]->position.y);
+    }	    
+
+    print_tree(header->root, 0);
+    double angle = get_angle_double(header->root->location.position, header->root->children[0]->location.position);
+
+    fprintf(stderr, "[DBG] angle between nodes 0 and 1 is: %f, or %f degrees\n", angle, angle * 180 / PI);
+
+    tree_node* steiner = steiner_point(header->root, header->root->children[0], header->root->children[0]->children[0]);
+    fprintf(stderr, "[DBG] steiner point of nodes 0, 1 and 2 is: (%f, %f)\n", steiner->location.position.x, steiner->location.position.y);
+    // fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
 #endif
 
     return;
 }
+
+//
+// return whether a given destination is an intended multicast target
+bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check)
+{
+    int i;
+    for(i = 0; i < target_count; i++){
+	if(compare_destinations(target_list[i], to_check)) return true;
+    }
+    return false;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// TREE FUNCTIONS
+
+// Build a Steiner tree out of a given list of real targets
+tree_node* build_steiner_tree(destination_t** target_list, int target_count)
+{
+    // Build root node
+    tree_node* root = generate_real_node(target_list[0]), *current, *previous;
+
+
+    // Build a "chain": each successive node from the target list is the child
+    // of the previous.
+    int i;
+    for(i = 1, previous = root; i < target_count; i++){
+        current = generate_real_node(target_list[i]);
+
+	add_child(previous, current);
+        previous = current;
+    }
+
+    return root;
+}
+
+// Create a tree tree out of a real target
+tree_node* generate_real_node(destination_t* target)
+{
+    tree_node* node = NEW(tree_node);
+    node->location = *target;
+    node->children = NULL;
+    node->child_count = 0;
+    node->isVirtual = 0;
+    node->isActive = 1;
+
+    return node;
+}
+
+// Create a tree tree out of a virtual target
+tree_node* generate_virtual_node(position_t position)
+{
+    tree_node* vnode = NEW(tree_node);
+    destination_t* vdest = NEW(destination_t);
+
+    // Generate a virtual destination: has ID == -3
+    vdest->id = -3;
+    vdest->position.x = position.x;
+    vdest->position.y = position.y;
+
+    vnode->location = *vdest;
+    vnode->children = NULL;
+    vnode->child_count = 0;
+    vnode->isVirtual = 1;
+    vnode->isActive = 1;
+
+    return vnode;
+}
+
+// Add a child node to a parent node's children list (and count)
+void add_child(tree_node* parent, tree_node* child)
+{
+    tree_node** children = parent->children;
+    int i = 0;
+
+    // Allocate a new child array of size + 1
+    parent->child_count++;
+    parent->children = malloc(sizeof(tree_node*) * parent->child_count);
+
+    // Copy over old child array to new larger array
+    if(children != NULL){
+        for(i = 0; i < parent->child_count - 1; i++){
+            parent->children[i] = children[i];
+        }
+    }
+
+    // Add the newest child at the end
+    parent->children[i] = child;
+}
+
+// Remove a child at a given index from a parent's child array
+void remove_child(tree_node* parent, int child_index)
+{
+    tree_node** children = parent->children;
+    int i, j;
+
+    // Allocate a new child array of size - 1
+    parent->child_count--;
+    parent->children = malloc(sizeof(tree_node*) * parent->child_count);
+
+    // Copy over each child from the original array, EXCEPT the designated orphan
+    for(i = 0, j = 0; i < parent->child_count; j++){
+        parent->children[i] = children[j];
+
+        // Continue for all but designated orphan
+        if(i != child_index) i++;
+    }
+}
+
+// Print function for debugging trees
+void print_tree(tree_node* node, int tab)
+{
+    int i, t;
+
+    for(t = 0; t < tab * 3; t++) fprintf(stderr, " ");
+
+    fprintf(stderr, "<id: %d (%f, %f), active: %s, virtual: %s>\n",
+	node->location.id, node->location.position.x, node->location.position.y,
+        (node->isActive ? "YES" : "NO"),
+        (node->isVirtual ? "YES" : "NO")
+    );
+    for(i = 0; i < node->child_count; i++)
+	print_tree(node->children[i], tab + 1);
+
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+// Steiner Geometry Helper Functions
+
+// Get the counter-clockwise angle between a east-pointing vector to single point
+double get_angle_single(position_t a)
+{
+    return atan2(a.y, a.x);
+}
+
+// Get the counter-clockwise angle between two points
+double get_angle_double(position_t a, position_t b)
+{
+    return atan2(a.y - b.y, a.x - b.x);
+}
+
+// Get the counter-clockwise angle <ABC
+double get_angle_triple(position_t a, position_t b, position_t c)
+{
+    return atan2(c.y - b.y, c.x - b.x) - atan2(a.y - b.y, a.x - b.x);
+}
+
+// Get the acute angle <ABC
+double get_acute_angle_triple(position_t a, position_t b, position_t c)
+{
+    double angle = absolute_value(get_angle_triple(a, b, c));
+
+    // Choose acute side
+    if(angle > PI) angle = 2 * PI - angle;
+
+    return angle;
+}
+
+// Get the third point of an equillateral triangle formed by two points a and b,
+// angled so that the base formed by a and b is facing c.
+position_t get_equillateral_third(position_t a, position_t b, position_t c)
+{
+    // distance from A to B
+    double dAB = distance(&a, &b);
+
+    // Clockwise angle from A to B
+    double AB = PI - get_angle_double(a, b);
+
+    // <BAC in radians
+    double BAC = get_angle_triple(b, a, c);
+
+    // rotate AB by 1/3 PI to get the angle of the third point on the equillateral
+    // triangle.
+    double shift = PI / 3;
+
+    // flip rotation if BAC is outside [0, 180] degree range, but not lower than -180
+    if(BAC < 0) shift *= -1;
+    if(absolute_value(BAC) > PI) shift *= -1;
+
+    AB += shift;
+
+    // Generate virtual node at the computed equillateral third
+    position_t equillateral_third;
+    equillateral_third.x = a.x + dAB * cos(AB);
+    equillateral_third.y = a.y - dAB * sin(AB);
+    equillateral_third.z = 0;
+
+    return equillateral_third;
+}
+
+// Calculate the steiner point of three tree nodes - the point which yields a 60-degree angle
+// between each adjacent pair of node locations and itself.
+tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c)
+{
+	fprintf(stderr, "[STN] a : (%f, %f)\n", a->location.position.x, a->location.position.y);
+	fprintf(stderr, "[STN] b : (%f, %f)\n", b->location.position.x, b->location.position.y);
+	fprintf(stderr, "[STN] c : (%f, %f)\n", c->location.position.x, c->location.position.y);
+
+    double bac = get_acute_angle_triple(b->location.position, a->location.position, c->location.position);
+    double abc = get_acute_angle_triple(a->location.position, b->location.position, c->location.position);
+    double acb = get_acute_angle_triple(a->location.position, c->location.position, b->location.position);
+
+    fprintf(stderr, "[STN] bac : %f\n", bac);
+    fprintf(stderr, "[STN] abc : %f\n", abc);
+    fprintf(stderr, "[STN] acb : %f\n", acb);
+
+    // 1) If two points are collocated (same position), steiner is the remaining third point
+    if(compare_positions(&a->location.position, &b->location.position)){
+        return c;
+    }
+    else if(compare_positions(&a->location.position, &c->location.position)){
+        return b;
+    }
+    else if(compare_positions(&b->location.position, &c->location.position)){
+        return a;
+    }
+    // 2) if the acute angle of any <XYZ is > 120 degrees, steiner is Y
+    else if(bac > 2 * PI / 3){
+        return a;
+    }
+    else if(abc > 2 * PI / 3){
+        return b;
+    }
+    else if(acb > 2 * PI / 3){
+        return c;
+    }
+    // 3) Compute the proper steiner point when all special cases checkout
+    else{
+        // Get third points on equillateral triangles formed by two pairs (third pair is uneccessary)
+        position_t ab = get_equillateral_third(a->location.position, b->location.position, c->location.position);
+        position_t ac = get_equillateral_third(a->location.position, c->location.position, b->location.position);
+        
+	fprintf(stderr, "[STN] ab : (%f, %f)\n", ab.x, ab.y);
+	fprintf(stderr, "[STN] ac : (%f, %f)\n", ac.x, ac.y);
+
+	// Compute intersection of the lines formed by each equillateral third and the remaining point
+        position_t steiner = get_intersection_point(ab, c->location.position, ac, b->location.position);
+        fprintf(stderr, "[STN] st : (%f, %f)\n", steiner.x, steiner.y);
+        return generate_virtual_node(steiner);
+    }
+}
+
+// Get the point of intersection between the lines containing points a1+a2 and b1+b2
+position_t get_intersection_point(position_t a1, position_t a2, position_t b1, position_t b2)
+{
+    fprintf(stderr, "[STN] Calculating intersection between L1<(%f, %f) - (%f, %f)>\n[STN]   and L2<(%f, %f) - (%f, %f)> ... \n",
+	a1.x, a1.y, a2.x, a2.y, b1.x, b1.y, b2.x, b2.y);
+
+    position_t intersection;
+    intersection.z = 0;
+
+    // line slopes
+    double m1 = 0, m2 = 0;
+
+    // Calculate slope (if possible: non-vertical line)
+    if(a2.x != a1.x){
+        m1 = (a2.y - a1.y) / (a2.x - a1.x);
+    }
+
+    if(b2.x != b1.x){
+        m2 = (b2.y - b1.y) / (b2.x - b1.x);
+    }
+
+    fprintf(stderr, "   M1: %f\n   M2: %f\n", m1, m2);
+
+    // Check for vertical lines
+    if(a2.x == a1.x && b2.x == b1.x){
+        // if both lines are vertical, the lines are parallel and no point of intersection exists
+        intersection.x = 0;
+        intersection.y = 0;
+
+        fprintf(stderr, "[ERR] Tried to calculate the intersection of two parallel lines.");
+    }
+    else if(a2.x == a1.x){
+        intersection.x = a1.x;
+        intersection.y = m2 * (a1.x - b1.x) + b1.y;
+    }
+    else if(b2.x == b1.x){
+        intersection.x = b1.x;
+        intersection.y = m1 * (b1.x - a1.x) + a1.y;
+    }
+    else{
+        intersection.x = (a1.y - m1 * a1.x - b1.y + m2 * b1.x) / (m2 - m1);
+        intersection.y = (m1 * m2 * (b1.x - a1.x) - m1 * b1.y + m2 * a1.y) / (m2 - m1);
+    }
+    fprintf(stderr, "[STN] intersection is: (%f, %f)\n", intersection.x, intersection.y);
+    return intersection;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Routing Functions - Old
 
 // returns next node for face routing
 destination_t next_on_face(call_t *call, destination_t *start,
@@ -1781,7 +2122,7 @@ void rx(call_t *call, packet_t *packet)
 	            tx(call, packet);
 		//if calling node is destination we need to keep routing packet
 		//but also deliver packet, so fall through to deliver case
-		if(!check_in_geocast(&header->dest, &me))
+		if(!check_in_target_list(header->target_list, header->target_count, &me))
 		    break;
 	    }
 	    else
@@ -2009,6 +2350,12 @@ mate_e sf_find_mate(call_t *call, packet_t *packet)
 
 ////////////////////////////////////////////////////////////////////////////////
 // General Helper Functions
+
+//get the absolute value of a double-type number
+double absolute_value(double n){
+    if(n < 0) n *= -1;
+    return n;
+}
 
 //cpmpares two positions
 bool compare_positions(position_t *l, position_t *r)
