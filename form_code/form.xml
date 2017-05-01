@@ -265,6 +265,28 @@
 -->
 
 <!--
+<entity name="routing" library="routing_spg_cldp">
+  <init loss_rate="" />
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_offgg">
+  <init loss_rate="" />
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_spg_sf">
+</entity>
+-->
+
+<!--
+<entity name="routing" library="routing_sfspg">
+</entity>
+-->
+
+<!--
 <entity name="routing" library="routing_gcfr">
 </entity>
 -->
@@ -306,6 +328,12 @@
 <entity name="application" library="application_geocast">
     <init source="" x_pos="" y_pos="" z_pos="" length="" radius=""/>
 </entity>
+-->
+
+<!--
+<entity name="application" library="application_multicast">
+  <init source="" num_targets="" percent=""/>
+</entity
 -->
 
 <!--
