@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <include/modelutils.h>
 #include <include/entity.h>
+#include "../../../wisebat/energy_wisebat/wisebat.h"
 
 /* ************************************************** */
 /* ************************************************** */
@@ -15,7 +16,7 @@
    of only one data packet at the same time. */
 
 //#define ONE_PACKET_AT_A_TIME
-
+#define CONSUME_POWER_ON_TX
 
 /* ************************************************** */
 /* ************************************************** */
@@ -149,6 +150,17 @@ int ioctl(call_t *c, int option, void *in, void **out) {
 /* ************************************************** */
 /* ************************************************** */
 int tx_delay(call_t *c, void *args) {
+#ifdef CONSUME_POWER_ON_TX
+      // End transmission
+//       fprintf(stderr, "[TX] %d finishes transmission at time: %f ms\n", c->node, (double)get_time());
+      battery_set_radio_mode(c, MODE_SLEEP);
+
+    if(is_node_dead(c)){
+        // Node has died mid-transmission
+	return 0;
+    }
+#endif
+
     struct entitydata *entitydata = get_entity_private_data(c);
     struct nodedata *nodedata = get_node_private_data(c);
     position_t *local = get_node_position(c->node);
@@ -182,6 +194,7 @@ int tx_delay(call_t *c, void *args) {
                 }
 	}       
       }
+      
       packet_dealloc(entry->packet);
     }
     /* Unicast packet */
@@ -191,6 +204,7 @@ int tx_delay(call_t *c, void *args) {
 	array_t *macs = get_mac_entities(&c0);
 	c0.entity = macs->elts[0];
 	RX(&c0, entry->packet);
+
 #ifdef LOG_MAC
 	fprintf(stdout,"[MAC] node %d delivers a packet to node %d\n", c->node, header->dst);
 #endif
@@ -247,6 +261,19 @@ void tx(call_t *c, packet_t *packet) {
     }
 #else
    uint64_t delay = get_time() + duration;
+
+#ifdef CONSUME_POWER_ON_TX
+   // Start transmission
+//   fprintf(stderr, "[TX] %d starts transmission at time: %f ms\n", c->node, (double)get_time());
+   battery_set_radio_mode(c, MODE_TX);
+
+    if(is_node_dead(c)){
+        // Node has died mid-transmission
+	return;
+    }
+
+#endif
+
    entry->event = scheduler_add_callback(delay, c, tx_delay, NULL);
    das_insert(nodedata->buffer, (void*)entry);
 #endif

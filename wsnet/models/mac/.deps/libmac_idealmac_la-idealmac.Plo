@@ -43,7 +43,8 @@ libmac_idealmac_la-idealmac.lo: idealmac.c /usr/include/stdio.h \
  ../../include/entity.h ../../include/packet.h ../../include/node.h \
  ../../include/param.h ../../include/measure.h ../../include/scheduler.h \
  ../../include/monitor.h ../../include/ioctl_message.h \
- ../../include/modulation.h
+ ../../include/modulation.h ../../../wisebat/energy_wisebat/wisebat.h \
+ ../../../wisebat/energy_wisebat/wisebat_tools.h
 
 /usr/include/stdio.h:
 
@@ -226,3 +227,7 @@ libmac_idealmac_la-idealmac.lo: idealmac.c /usr/include/stdio.h \
 ../../include/ioctl_message.h:
 
 ../../include/modulation.h:
+
+../../../wisebat/energy_wisebat/wisebat.h:
+
+../../../wisebat/energy_wisebat/wisebat_tools.h:
