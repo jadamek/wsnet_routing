@@ -1,6 +1,6 @@
 // spg.c
-// Geographic Multicasting Protocol (GMP) Module with Dijkstra and Connected
-// Dominating Set, plus error rate and offline planarization
+// Geographic Multicasting Protocol (GMP) Module with Dijkstra
+// plus error rate and offline planarization
 // Jordan Adamek
 // 12/11/2016
 
@@ -12,6 +12,7 @@
 
 #include <include/modelutils.h>
 #define LOG_ROUTING
+//#define DBG_STEINER
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
 
@@ -105,6 +106,17 @@ typedef struct tnode
     bool isActive;
 } tree_node;
 
+//Tuple (root, steiner, left, right) for tree construction
+typedef struct
+{
+    tree_node* s;
+    tree_node* t;
+    tree_node* u;
+    tree_node* v;
+    double reduction_ratio;
+    bool active;
+} steiner_tuple;
+
 //packet information needed for routing
 typedef struct
 {
@@ -177,15 +189,21 @@ void* get_shortest_path(call_t *call, destination_t *dest);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
 
-//tree functions
-tree_node* build_steiner_tree(destination_t** target_list, int target_count);
+// steiner tree construction functions
+tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count);
 tree_node* generate_real_node(destination_t* target);
 tree_node* generate_virtual_node(position_t position);
 void add_child(tree_node* parent, tree_node* child);
 void remove_child(tree_node* parent, int child_index);
+double distance_sum(tree_node* node, position_t origin);
+int sub_target_count(tree_node* node);
+tree_node** sub_target_list(tree_node* node);
+void accumulate_target_list(tree_node* node, tree_node** target_list, int* current);
+steiner_tuple* generate_steiner_tuple(tree_node* root, tree_node* left, tree_node* right);
+int compare_steiner_tuples(const void* tuple1, const void* tuple2);
 void print_tree(tree_node* node, int tab);
 
-//steiner tree functions
+//steiner tree geometry functions
 double get_angle_single(position_t a);
 double get_angle_double(position_t a, position_t b);
 double get_angle_triple(position_t a, position_t b, position_t c);
@@ -193,6 +211,7 @@ double get_acute_angle_triple(position_t a, position_t b, position_t c);
 position_t equillateral_third(position_t a, position_t b, position_t c);
 position_t get_intersection_point(position_t a1, position_t a2, position_t b1, position_t b2);	
 tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c);
+double compute_distance(tree_node* a, tree_node* b);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
@@ -480,18 +499,22 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->target_list = malloc(sizeof(destination_t*) * header->target_count);
 
     // Generate target list
-    int i = 0;
+    int i = 0, di = 0;
     destination_t* tmp = 0;
 
     for(i = 0; i < header->target_count; i++){
-	tmp = NEW(destination_t);
-	tmp->id = i;
-	tmp->position = *get_node_position(i);
+        if(i == my_pos.id){
+	    // Skip one ID if Source would be included as a target
+	    di++;
+	}
 
-	header->target_list[i] = tmp;
+	tmp = NEW(destination_t);
+	tmp->id = i + di;
+	tmp->position = *get_node_position(i + di);
+	header->target_list[i] = tmp;	    
     }
 
-    header->root = build_steiner_tree(header->target_list, header->target_count);
+    header->root = build_steiner_tree(&header->src, header->target_list, header->target_count);
 
     if(compare_destinations(&header->dest, &no_dest))
     {
@@ -1060,13 +1083,8 @@ void forward(call_t *call, packet_t *packet)
 	fprintf(stderr, "[RTG]   %d <%f, %f>\n", header->target_list[i]->id, header->target_list[i]->position.x, header->target_list[i]->position.y);
     }	    
 
-    print_tree(header->root, 0);
-    double angle = get_angle_double(header->root->location.position, header->root->children[0]->location.position);
-
-    fprintf(stderr, "[DBG] angle between nodes 0 and 1 is: %f, or %f degrees\n", angle, angle * 180 / PI);
-
-    tree_node* steiner = steiner_point(header->root, header->root->children[0], header->root->children[0]->children[0]);
-    fprintf(stderr, "[DBG] steiner point of nodes 0, 1 and 2 is: (%f, %f)\n", steiner->location.position.x, steiner->location.position.y);
+    fprintf(stderr, "[RTG] steiner tree:\n");
+    print_tree(header->root, 2);
     // fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
 #endif
 
@@ -1088,20 +1106,241 @@ bool check_in_target_list(destination_t** target_list, int target_count, destina
 // TREE FUNCTIONS
 
 // Build a Steiner tree out of a given list of real targets
-tree_node* build_steiner_tree(destination_t** target_list, int target_count)
+tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count)
 {
+    int i, j, k, updated_target_count, updated_pair_count;
+
     // Build root node
-    tree_node* root = generate_real_node(target_list[0]), *current, *previous;
+    tree_node* root = generate_real_node(source);
+
+    // Step 1 - Create an array of steiner nodes for each target
+    tree_node** destinations = malloc(sizeof(tree_node*) * target_count);
+    for(i = 0; i < target_count; i++){
+        destinations[i] = generate_real_node(target_list[i]);
+    }
+
+    // Step 2 - Compute steiner tuples for every unique pair of targets (including pairs with
+    //		self), and the root
+    int pair_count = target_count * (target_count + 1) / 2;
+    steiner_tuple** pairs = malloc(sizeof(steiner_tuple*) * pair_count);
+ 
+    for(i = 0, k = 0; i < target_count; i++){
+        for(j = 0; j < target_count; j++){
+	    if(destinations[i]->location.id <= destinations[j]->location.id){
+		pairs[k++] = generate_steiner_tuple(root, destinations[i], destinations[j]);
+	    }
+	}
+    }
+
+    // Step 3 - Sort Steiner Tuples by their reduction ratios in descending order
+    qsort(pairs, pair_count, sizeof(steiner_tuple*), compare_steiner_tuples);
 
 
-    // Build a "chain": each successive node from the target list is the child
-    // of the previous.
-    int i;
-    for(i = 1, previous = root; i < target_count; i++){
-        current = generate_real_node(target_list[i]);
+    tree_node* s = root;	// Current node being built upon - initially the root
+    tree_node* addition = NULL;	// New (virtual) node to be added to destinations 
+				// during cleanup after A9 is executed
+    bool clean = false;		// Flag signalling that the destinations and pairs
+				// arrays need to be cleaned of inactive nodes/tuples
+				// at the end of the round
+    bool clean_pairs = false;   // Similar to above flag, but for Steiner tuples pairs
+				// ONLY (when a single tuple is removed throught A5,A6-a,A7-a)
 
-	add_child(previous, current);
-        previous = current;
+    // Step 4 - Iteratively construct the tree
+    while(pair_count > 0){
+
+#ifdef DGB_STEINER
+    fprintf(stderr, "Remaining Sorted Steiner Tuples:\n");
+    for(i = 0; i < pair_count; i++){
+        fprintf(stderr, "    - Ratio %f <\n", pairs[i]->reduction_ratio);
+	fprintf(stderr, "       S:%d(%f, %f)\n", pairs[i]->s->location.id,
+		pairs[i]->s->location.position.x, pairs[i]->s->location.position.y);
+	fprintf(stderr, "       T:%d(%f, %f)\n", pairs[i]->t->location.id,
+		pairs[i]->t->location.position.x, pairs[i]->t->location.position.y);
+	fprintf(stderr, "       U:%d(%f, %f)\n", pairs[i]->u->location.id,
+		pairs[i]->u->location.position.x, pairs[i]->u->location.position.y);
+	fprintf(stderr, "       V:%d(%f, %f)\n", pairs[i]->v->location.id,
+		pairs[i]->v->location.position.x, pairs[i]->v->location.position.y);
+    }
+#endif
+        steiner_tuple* best = pairs[0];
+
+	// Choose conditional (prioritized) build action:
+	// A1 : IF u == v, then s adds u|v as child
+        if(best->u == best->v){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A1\n");
+#endif
+	    add_child(s, best->u);
+            clean = true;
+	}
+        // A2 : IF t is collocated with s, then s adds u and v as children
+        else if(best->t == s){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A2\n");
+#endif
+	    add_child(s, best->u);
+	    add_child(s, best->v);
+            clean = true;
+	}
+   	// A3 : IF t is collocated with u, then u adds v as child
+        else if(best->t == best->u){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A3\n");
+#endif
+	    add_child(best->u, best->v);
+	    clean = true;
+        }
+        // A4 : IF t is collocated with v, then v adds u as child
+        else if(best->t == best->v){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A4\n");
+#endif
+	    add_child(best->v, best->u);
+	    clean = true;
+        }
+	// A5 : IF d(s, u) < R && d(s, v) < R, then remove this tuple
+        else if(compute_distance(s, best->u) < RADIO_RANGE && compute_distance(s, best->v) < RADIO_RANGE){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A5\n");
+#endif
+	    // Deactivate (remove) the top (best) pair
+            best->active = false;
+	    clean_pairs = true;
+        }
+        // A6 : IF only d(s, u) < R :
+	else if(compute_distance(s, best->u) < RADIO_RANGE){
+	    // A6-a : IF R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then remove this tuple
+	    if(RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v)){
+#ifdef DGB_STEINER
+	    	fprintf(stderr, "[STN] A6-a\n");
+#endif
+	        // Deactivate (remove) the top (best) pair
+                best->active = false;
+		clean_pairs = true;
+            }
+	    // A6-b : ELSE u adds v as child
+	    else{
+#ifdef DGB_STEINER
+	    	fprintf(stderr, "[STN] A6-b\n");
+#endif
+		add_child(best->u, best->v);
+		clean = true;
+	   }
+	}
+        // A7 : IF only d(s, v) < R :
+	else if(compute_distance(s, best->v) < RADIO_RANGE){
+	    // A7-a : IF R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then remove this tuple
+	    if(RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v)){
+#ifdef DGB_STEINER
+	    	fprintf(stderr, "[STN] A7-a\n");
+#endif
+	        // Deactivate (remove) the top (best) pair
+                best->active = false;
+		clean_pairs = true;
+            }
+	    // A7-b : ELSE v adds u as child
+	    else{
+#ifdef DGB_STEINER
+	    	fprintf(stderr, "[STN] A7-b\n");
+#endif
+		add_child(best->v, best->u);
+		clean = true;
+	   }
+	}
+	// A8 : IF d(s, t) < R && R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then s adds u and v as children
+	else if(compute_distance(s, best->t) < RADIO_RANGE
+	    && RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v))
+        {
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] A8\n");
+#endif
+	    add_child(s, best->u);
+	    add_child(s, best->v);
+	    clean = true;
+        }
+        // AD : Final Default Action : s adds t, a virtual Steiner point, as its child, and t adds u and v as children
+	else{
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] AD\n");
+#endif
+	    add_child(best->t, best->u);
+	    add_child(best->t, best->v);
+
+	    addition = best->t;
+	    clean = true;
+	}
+
+	// End of build round
+	// Remove any deactivated nodes and pairs containing deactivated nodes, as well
+	// as add any virtual nodes and their computed steiner tuples
+	if(clean){
+#ifdef DGB_STEINER
+	    fprintf(stderr, "[STN] Cleaning round ...\n");
+	    if(addition != NULL){
+ 	        fprintf(stderr, "[STN] Adding virtual node %d<%f, %f>\n", addition->location.id, addition->location.position.x, addition->location.position.y);
+	    }
+#endif
+	    // UPDATE DESTINATIONS ARRAY
+	    // Count the number of still active destinations, +1 if a new virtual node is to be added
+	    for(i = 0, updated_target_count = 0; i < target_count; i++){
+	    	if(destinations[i]->isActive) updated_target_count++;
+	    }
+	    if(addition != NULL) updated_target_count++;
+
+	    tree_node** updated_destinations = malloc(sizeof(tree_node*) * updated_target_count);
+	    // Retain only active destinations
+	    for(i = 0, j = 0; i < target_count; i++){
+	        if(destinations[i]->isActive){
+		    updated_destinations[j++] = destinations[i];
+		}
+	    }
+
+	    // Add new virtual node (if necessary)
+            if(addition != NULL){
+	    	updated_destinations[j] = addition;
+	    }
+
+	    destinations = updated_destinations;
+	    target_count = updated_target_count;
+	}
+
+	if(clean || clean_pairs){
+	    // UPDATE PAIRS ARRAY
+	    // Count the number of pairs with both u|v active, +N if a new virtual node is to be added
+	    for(i = 0, updated_pair_count = 0; i < pair_count; i++){
+	    	if(pairs[i]->active && (pairs[i]->u->isActive && pairs[i]->v->isActive)){
+		    updated_pair_count++;
+		}
+	    }
+	    if(addition != NULL) updated_pair_count += target_count;
+
+	    steiner_tuple** updated_pairs = malloc(sizeof(steiner_tuple*) * updated_pair_count);
+	    // Retain only active pairs
+	    for(i = 0, j = 0; i < pair_count; i++){
+	    	if(pairs[i]->active && (pairs[i]->u->isActive && pairs[i]->v->isActive)){
+		    updated_pairs[j++] = pairs[i];
+		}
+	    }
+
+	    // Add all pairs for virtual node (if necessary)
+            if(addition != NULL){
+		for(i = 0; i < target_count; i++){
+		    updated_pairs[j++] = generate_steiner_tuple(root, addition, destinations[i]);
+		}		
+	    }
+
+	    pairs = updated_pairs;
+	    pair_count = updated_pair_count;
+
+	    // Re-sort tuples for to include newly added pairs
+            if(addition != NULL){		
+    		qsort(pairs, pair_count, sizeof(steiner_tuple*), compare_steiner_tuples);
+            }
+
+	    clean = false;
+	    clean_pairs = false;
+	    addition = NULL;
+	}
     }
 
     return root;
@@ -1114,8 +1353,8 @@ tree_node* generate_real_node(destination_t* target)
     node->location = *target;
     node->children = NULL;
     node->child_count = 0;
-    node->isVirtual = 0;
-    node->isActive = 1;
+    node->isVirtual = false;
+    node->isActive = true;
 
     return node;
 }
@@ -1134,8 +1373,8 @@ tree_node* generate_virtual_node(position_t position)
     vnode->location = *vdest;
     vnode->children = NULL;
     vnode->child_count = 0;
-    vnode->isVirtual = 1;
-    vnode->isActive = 1;
+    vnode->isVirtual = true;
+    vnode->isActive = true;
 
     return vnode;
 }
@@ -1159,6 +1398,9 @@ void add_child(tree_node* parent, tree_node* child)
 
     // Add the newest child at the end
     parent->children[i] = child;
+
+    // Deactivate child from tree ownership consideration
+    child->isActive = false;
 }
 
 // Remove a child at a given index from a parent's child array
@@ -1178,6 +1420,125 @@ void remove_child(tree_node* parent, int child_index)
         // Continue for all but designated orphan
         if(i != child_index) i++;
     }
+}
+
+// Calculate the sum of the distance this node and all its non-virtual descendants and some origin
+double distance_sum(tree_node* node, position_t origin)
+{
+    double d = (node->isVirtual ? 0 : distance(&node->location.position, &origin));
+
+    int i;
+    for(i = 0; i < node->child_count; i++){
+        d += distance_sum(node->children[i], origin);
+    }
+
+    return d;
+}
+
+// Calculate the number of non-virtual descendants (+ 1) of a given node
+int sub_target_count(tree_node* node)
+{
+    int total = 0, i;
+
+    if(!node->isVirtual) total++;
+
+    for(i = 0; i < node->child_count; i++){
+        total += sub_target_count(node->children[i]);
+    }
+
+    return total;
+}
+
+// Gather a cumulative list in target_list of all non-virtual descendants of node
+tree_node** sub_target_list(tree_node* node)
+{    
+    tree_node** target_list = malloc(sizeof(tree_node*) * sub_target_count(node));
+    int current = 0;
+
+    accumulate_target_list(node, target_list, &current);
+
+    return target_list;
+}
+
+// Recursively accumulate non-virtual descendants of node
+void accumulate_target_list(tree_node* node, tree_node** target_list, int* current)
+{
+    if(!node->isVirtual){
+        target_list[(*current)++] = node;
+    }
+
+    int i;
+    for(i = 0; i < node->child_count; i++){
+        accumulate_target_list(node->children[i], target_list, current);
+    }
+}
+
+// Generate a tuple: (s, t, u, v), where s is the root of the steiner triple, u and v are
+// the "left" and "right" points, and t is the computed steiner point using s,u,v
+steiner_tuple* generate_steiner_tuple(tree_node* root, tree_node* left, tree_node* right)
+{
+    steiner_tuple* tuple = NEW(steiner_tuple);
+    tuple->s = root;
+    tuple->t = steiner_point(root, left, right);
+    tuple->u = left;
+    tuple->v = right;
+    tuple->active = true;
+
+    // compute reduction ratio for this tuple
+
+    double st = compute_distance(tuple->s, tuple->t);
+    double su = compute_distance(tuple->s, tuple->u);
+    double sv = compute_distance(tuple->s, tuple->v);
+    double tu = compute_distance(tuple->t, tuple->u);
+    double tv = compute_distance(tuple->t, tuple->v);
+
+#ifdef DGB_STEINER
+    fprintf(stderr, "[STN] calculating ratio ... \n");
+    fprintf(stderr, "[STN]    s<%f, %f> t<%f, %f> = %f\n",
+        tuple->s->location.position.x, tuple->s->location.position.y,
+	tuple->t->location.position.x, tuple->t->location.position.y,
+	st
+    );
+    fprintf(stderr, "[STN]    s<%f, %f> u<%f, %f> = %f\n",
+        tuple->s->location.position.x, tuple->s->location.position.y,
+	tuple->u->location.position.x, tuple->u->location.position.y,
+	su
+    );
+    fprintf(stderr, "[STN]    s<%f, %f> v<%f, %f> = %f\n",
+        tuple->s->location.position.x, tuple->s->location.position.y,
+	tuple->v->location.position.x, tuple->v->location.position.y,
+	sv
+    );
+    fprintf(stderr, "[STN]    t<%f, %f> u<%f, %f> = %f\n",
+	tuple->t->location.position.x, tuple->t->location.position.y,
+        tuple->u->location.position.x, tuple->u->location.position.y,
+	tu
+    );
+    fprintf(stderr, "[STN]    t<%f, %f> v<%f, %f> = %f\n",
+	tuple->t->location.position.x, tuple->t->location.position.y,
+        tuple->v->location.position.x, tuple->v->location.position.y,
+	tv
+    );
+#endif
+
+    tuple->reduction_ratio = 1.0 - (st + tu + tv) / (su + sv);
+
+#ifdef DGB_STEINER
+    fprintf(stderr, "[STN]      Ratio = %f\n", tuple->reduction_ratio);
+#endif
+
+    return tuple;
+}
+
+// Comparison function for sorting steiner tuples by their reduction ratios
+int compare_steiner_tuples(const void* tuple1, const void* tuple2)
+{
+    double ratio1 = (*((steiner_tuple**)tuple1))->reduction_ratio;
+    double ratio2 = (*((steiner_tuple**)tuple2))->reduction_ratio;
+
+    if(ratio1 > ratio2) return -1;
+    if(ratio1 < ratio2) return  1;
+    return 0;
 }
 
 // Print function for debugging trees
@@ -1266,17 +1627,19 @@ position_t get_equillateral_third(position_t a, position_t b, position_t c)
 // between each adjacent pair of node locations and itself.
 tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c)
 {
-	fprintf(stderr, "[STN] a : (%f, %f)\n", a->location.position.x, a->location.position.y);
-	fprintf(stderr, "[STN] b : (%f, %f)\n", b->location.position.x, b->location.position.y);
-	fprintf(stderr, "[STN] c : (%f, %f)\n", c->location.position.x, c->location.position.y);
-
     double bac = get_acute_angle_triple(b->location.position, a->location.position, c->location.position);
     double abc = get_acute_angle_triple(a->location.position, b->location.position, c->location.position);
     double acb = get_acute_angle_triple(a->location.position, c->location.position, b->location.position);
 
+#ifdef DBG_STEINER
+    fprintf(stderr, "[STN] a : (%f, %f)\n", a->location.position.x, a->location.position.y);
+    fprintf(stderr, "[STN] b : (%f, %f)\n", b->location.position.x, b->location.position.y);
+    fprintf(stderr, "[STN] c : (%f, %f)\n", c->location.position.x, c->location.position.y);
+
     fprintf(stderr, "[STN] bac : %f\n", bac);
     fprintf(stderr, "[STN] abc : %f\n", abc);
     fprintf(stderr, "[STN] acb : %f\n", acb);
+#endif
 
     // 1) If two points are collocated (same position), steiner is the remaining third point
     if(compare_positions(&a->location.position, &b->location.position)){
@@ -1304,21 +1667,36 @@ tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c)
         position_t ab = get_equillateral_third(a->location.position, b->location.position, c->location.position);
         position_t ac = get_equillateral_third(a->location.position, c->location.position, b->location.position);
         
+#ifdef DBG_STEINER
 	fprintf(stderr, "[STN] ab : (%f, %f)\n", ab.x, ab.y);
 	fprintf(stderr, "[STN] ac : (%f, %f)\n", ac.x, ac.y);
+#endif
 
 	// Compute intersection of the lines formed by each equillateral third and the remaining point
         position_t steiner = get_intersection_point(ab, c->location.position, ac, b->location.position);
+
+#ifdef DBG_STEINER
         fprintf(stderr, "[STN] st : (%f, %f)\n", steiner.x, steiner.y);
+#endif
         return generate_virtual_node(steiner);
     }
+}
+
+// Compute the distance between two steiner tree node locations
+double compute_distance(tree_node* a, tree_node* b){
+    double dx = a->location.position.x - b->location.position.x;
+    double dy = a->location.position.y - b->location.position.y;
+
+    return sqrt(dx * dx + dy * dy);
 }
 
 // Get the point of intersection between the lines containing points a1+a2 and b1+b2
 position_t get_intersection_point(position_t a1, position_t a2, position_t b1, position_t b2)
 {
+#ifdef DBG_STEINER
     fprintf(stderr, "[STN] Calculating intersection between L1<(%f, %f) - (%f, %f)>\n[STN]   and L2<(%f, %f) - (%f, %f)> ... \n",
 	a1.x, a1.y, a2.x, a2.y, b1.x, b1.y, b2.x, b2.y);
+#endif
 
     position_t intersection;
     intersection.z = 0;
@@ -1335,7 +1713,9 @@ position_t get_intersection_point(position_t a1, position_t a2, position_t b1, p
         m2 = (b2.y - b1.y) / (b2.x - b1.x);
     }
 
+#ifdef DBG_STEINER
     fprintf(stderr, "   M1: %f\n   M2: %f\n", m1, m2);
+#endif
 
     // Check for vertical lines
     if(a2.x == a1.x && b2.x == b1.x){
@@ -1357,7 +1737,11 @@ position_t get_intersection_point(position_t a1, position_t a2, position_t b1, p
         intersection.x = (a1.y - m1 * a1.x - b1.y + m2 * b1.x) / (m2 - m1);
         intersection.y = (m1 * m2 * (b1.x - a1.x) - m1 * b1.y + m2 * a1.y) / (m2 - m1);
     }
+
+#ifdef DBG_STEINER
     fprintf(stderr, "[STN] intersection is: (%f, %f)\n", intersection.x, intersection.y);
+#endif
+
     return intersection;
 }
 
