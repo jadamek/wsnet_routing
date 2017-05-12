@@ -117,6 +117,13 @@ typedef struct
     bool active;
 } steiner_tuple;
 
+//linked-list of pivots
+typedef struct ll_node{
+    tree_node* current;
+    struct ll_node* next;
+    struct ll_node* prev;
+} pivot_list_node;
+
 //packet information needed for routing
 typedef struct
 {
@@ -184,8 +191,8 @@ bool no_outside_nbr(void *nbr_list, destination_t *dest);
 void add_outside_nbr(call_t *call, void *list, destination_t *dest);
 void planarize_graph(call_t *call);
 int hello_callback(call_t *call, void *args);
-int start_dijk(call_t *call, destination_t *dest);
-void* get_shortest_path(call_t *call, destination_t *dest);
+int start_dijk(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
+void* get_shortest_path(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
 
@@ -197,8 +204,8 @@ void add_child(tree_node* parent, tree_node* child);
 void remove_child(tree_node* parent, int child_index);
 double distance_sum(tree_node* node, position_t origin);
 int sub_target_count(tree_node* node);
-tree_node** sub_target_list(tree_node* node);
-void accumulate_target_list(tree_node* node, tree_node** target_list, int* current);
+destination_t** sub_target_list(tree_node* node);
+void accumulate_target_list(tree_node* node, destination_t** target_list, int* current);
 steiner_tuple* generate_steiner_tuple(tree_node* root, tree_node* left, tree_node* right);
 int compare_steiner_tuples(const void* tuple1, const void* tuple2);
 void print_tree(tree_node* node, int tab);
@@ -215,6 +222,9 @@ double compute_distance(tree_node* a, tree_node* b);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
+pivot_list_node* generate_pivot(tree_node* d);
+pivot_list_node* remove_pivot(pivot_list_node* discarded);
+pivot_list_node* add_pivot(pivot_list_node* left, tree_node* addition);
 bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check);
 
 //routing functions - cfr/flood
@@ -476,10 +486,6 @@ int bootstrap(call_t *call)
 //in that module
 int set_header(call_t *call, packet_t *packet, destination_t *dest)
 {
-    do_cds(call, dest);
-    if(start_dijk(call, dest) == ERROR)
-	fprintf(stderr, "[ERR] unable to start shortest path\n");
-
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     call_t call_down = CALL_DOWN(call);
@@ -515,6 +521,10 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     }
 
     header->root = build_steiner_tree(&header->src, header->target_list, header->target_count);
+
+    //do_cds(call, dest);
+    if(start_dijk(call, dest, header->target_list, header->target_count) == ERROR)
+	fprintf(stderr, "[ERR] unable to start shortest path\n");
 
     if(compare_destinations(&header->dest, &no_dest))
     {
@@ -854,7 +864,7 @@ bool node_present_in(void *das, destination_t *identify)
 ////////////////////////////////////////////////////////////////////////////////
 // Dijkstra Functions
 
-int start_dijk(call_t *call, destination_t *dest)
+int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, int target_count)
 {
     entity_data_t *entity_data = ENTITY_DATA(call);
     entity_data->dijk_latency = get_time();
@@ -878,8 +888,10 @@ int start_dijk(call_t *call, destination_t *dest)
     header->type = D_PACKET;
     header->direction = NO_DIR;
     header->ttl = 0;
+    header->target_list = target_list;
+    header->target_count = target_count;
 
-    if((header->path = get_shortest_path(call, dest)) == NULL)
+    if((header->path = get_shortest_path(call, dest, target_list, target_count)) == NULL)
     {
 	fprintf(stderr, "[ERR] No shortest path found\n");
 	return ERROR;
@@ -888,7 +900,7 @@ int start_dijk(call_t *call, destination_t *dest)
     return 0;
 }
 
-void* get_shortest_path(call_t *call, destination_t *dest)
+void* get_shortest_path(call_t *call, destination_t* dest, destination_t** target_list, int target_count)
 {
     entity_data_t *entity_data = ENTITY_DATA(call);
     node_data_t *node_data = NODE_DATA(call);
@@ -906,7 +918,7 @@ void* get_shortest_path(call_t *call, destination_t *dest)
 	    continue;
 	destination_t tmp_dest = {i, *get_node_position(i)};
 
-	if(check_in_geocast(dest, &tmp_dest))
+	if(check_in_target_list(target_list, target_count, &tmp_dest))
 	    ++num_targets;
     }
 
@@ -947,7 +959,7 @@ void* get_shortest_path(call_t *call, destination_t *dest)
 		{
 		    new->this = tmp->id;
 		    new->prev = tmp1->this;
-		    if(check_in_geocast(dest, tmp))
+		    if(check_in_target_list(target_list, target_count, tmp))
 		    {
 			*last_found = *new;
 			entity_data->num_reachable++;
@@ -1065,6 +1077,8 @@ void tx(call_t *call, packet_t *packet)
     return;
 }
 
+void das_create(){
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // Routing Functions - GMP
@@ -1076,9 +1090,11 @@ void forward(call_t *call, packet_t *packet)
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
 
+    int i, c;
+    bool removing_first_pivot;
+
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] target list(%d):\n", header->target_count);
-    int i;
     for(i = 0; i < header->target_count; i++){
 	fprintf(stderr, "[RTG]   %d <%f, %f>\n", header->target_list[i]->id, header->target_list[i]->position.x, header->target_list[i]->position.y);
     }	    
@@ -1088,7 +1104,210 @@ void forward(call_t *call, packet_t *packet)
     // fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
 #endif
 
+    if(header->root->child_count == 0){
+        return;
+    }
+
+    // Generate pivot list (all children of root in tree)
+    pivot_list_node* pivots = generate_pivot(header->root->children[0]);
+    pivot_list_node* pivot = NULL, *last = pivots;
+
+
+    for(i = 1; i < header->root->child_count; i++){
+        last = add_pivot(last, header->root->children[i]);
+    }
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] Begin routing on pivot list:\n");
+    pivot = pivots;
+    while(pivot != NULL){
+        fprintf(stderr, "         %d (%f, %f)\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
+        pivot = pivot->next;
+    }
+#endif
+
+    // Route each pivot
+    pivot = pivots;
+    while(pivot != NULL){
+	// If pivot has already been successfully reached
+        if(compare_destinations(&pivot->current->location, &my_pos)){
+            for(c = 0; c < pivot->current->child_count; c++){
+                last = add_pivot(last, pivot->current->children[c]);
+	    }
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "Successfully delivered to destination %d.\n", my_pos.id);
+#endif
+
+	    removing_first_pivot = pivot == pivots;
+	    pivot = remove_pivot(pivot);
+	    if(removing_first_pivot) pivots = pivot;
+        }
+	// Otherwise, deliver to next node
+        else{
+            destination_t* next = NULL;
+
+            // Find greedy next neighbor
+	    destination_t *gg_nbr = NULL;
+	    int size = das_getsize(node_data->gg_list);
+	    das_init_traverse(node_data->gg_list);
+
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "[RTG] Looking for greedy neighbor for pivot %d (%f, %f) -\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
+#endif
+	    for(i = 0; i < size; ++i){
+		gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
+
+                // If the total distance of all pivot sub-destinations is less for the target node than the current
+		// position, consider this node when calculating the closest neighbor to the pivot.
+                if(distance_sum(pivot->current, gg_nbr->position) < distance_sum(pivot->current, my_pos.position)){
+#ifdef LOG_ROUTING
+		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, distance(&gg_nbr->position, &pivot->current->location.position));
+#endif
+		    if(next == NULL || distance(&gg_nbr->position, &pivot->current->location.position) < distance(&next->position, &pivot->current->location.position)){
+#ifdef LOG_ROUTING
+			fprintf(stderr, "Chosen");
+#endif
+			
+			next = gg_nbr;
+		    }
+#ifdef LOG_ROUTING
+			fprintf(stderr, "\n");
+#endif
+		}
+	    }
+
+            // If a greedy neighbor is successfully found for this pivot ...
+            if(next != NULL){
+		if(false){ // Eventual face stuff ...
+		}
+		else{
+		    // Send split-off pivot to chosen neighbor
+		    // Gather non-virtual sub-destinations of pivot		  
+		    destination_t** vp = sub_target_list(pivot->current);
+		    int vp_count = sub_target_count(pivot->current);
+
+#ifdef LOG_ROUTING
+                    fprintf(stderr, "[RTG] Sending pivot %d to best neighbor %d\n", pivot->current->location.id, next->id);
+#endif
+		    // Send to greedy neighbor
+		    packet_t* spawn_packet = copy_packet(call, packet, header, INCREMENT);
+		    header_t* spawn_header = PACKET_HEADER(spawn_packet, node_data);
+
+		    spawn_header->sender = my_pos;
+		    spawn_header->next_node = *next;
+		    spawn_header->target_list = vp;
+		    spawn_header->target_count = vp_count;
+		    spawn_header->root = build_steiner_tree(next, vp, vp_count);
+
+		    if(set_mac_header_tx(call, spawn_packet) == ERROR)
+			fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
+
+		    // remove delivered pivot
+	    	    removing_first_pivot = pivot == pivots;
+	            pivot = remove_pivot(pivot);
+	            if(removing_first_pivot) pivots = pivot;		    
+		}
+	    }
+	    // Failed greedy routing ... Checking if failed pivot has any children
+            else if(pivot->current->child_count != 0){
+
+		// Choose last child, and reattach to root.
+		// Next iteration will continue to attempt routing of this same pivot.
+		tree_node* last_child = pivot->current->children[pivot->current->child_count - 1];
+
+		remove_child(pivot->current, pivot->current->child_count - 1);
+		last = add_pivot(last, last_child);
+
+#ifdef LOG_ROUTING
+		fprintf(stderr, "[RTG] Failed greedy routing ... reattaching child %d (%f, %f)\n", last_child->location.id, last_child->location.position.x, last_child->location.position.y);
+#endif
+
+		// If we have just detached a child from a virtual split, remove
+		// the now unnecessary virtual node
+		if(pivot->current->child_count == 1 && pivot->current->isVirtual){
+#ifdef LOG_ROUTING
+		    fprintf(stderr, "[RTG] Remaining parent is a virtual split. Reattaching remaining child %d.\n", pivot->current->children[0]->location.id);
+#endif
+		    last = add_pivot(last, pivot->current->children[0]);
+
+	    	    removing_first_pivot = pivot == pivots;
+	    	    pivot = remove_pivot(pivot);
+	    	    if(removing_first_pivot) pivots = pivot;
+		}
+	    }
+	    // Failed greedy routing, and pivot is childless
+	    else{
+		// If virtual, remove it
+		if(pivot->current->isVirtual){
+
+#ifdef LOG_ROUTING
+		fprintf(stderr, "[RTG] Failed greedy routing ... removing virtual childess pivot.\n");
+#endif
+	    	    removing_first_pivot = pivot == pivots;
+	            pivot = remove_pivot(pivot);
+	            if(removing_first_pivot) pivots = pivot;		    
+		}
+		// Otherwise, skip this pivot for now
+		else{
+#ifdef LOG_ROUTING
+		fprintf(stderr, "[RTG] Failed greedy routing ... Skipping this pivot.\n");
+#endif
+		pivot = pivot->next;
+		}		
+	    }
+        }
+
+    }
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] Main pivot loop complete.\n");
+
+    if(pivots != NULL){
+        fprintf(stderr, "[RTG] Remaining pivots:\n");
+        pivot = pivots;
+        while(pivot != NULL){
+            fprintf(stderr, "         %d (%f, %f)\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
+            pivot = pivot->next;
+        }
+    }
+#endif
+
     return;
+}
+
+// Generate a pivot from a tree node destination
+pivot_list_node* generate_pivot(tree_node* d){
+    pivot_list_node* pivot = NEW(pivot_list_node);
+    pivot->current = d;
+    pivot->next = NULL;
+    pivot->prev = NULL;
+
+    return pivot;
+}
+
+// Remove a pivot from the linked list
+pivot_list_node* remove_pivot(pivot_list_node* discarded){
+    if(discarded->prev != NULL){
+        discarded->prev->next = discarded->next;
+    }
+
+    if(discarded->next != NULL){
+        discarded->next->prev = discarded->prev;
+    }
+
+    return discarded->next;
+}
+
+// Add a pivot to a linked list of pivots
+pivot_list_node* add_pivot(pivot_list_node* left, tree_node* addition){
+    pivot_list_node* new_node = NEW(pivot_list_node);
+    new_node->current = addition;
+    new_node->next = NULL;
+    new_node->prev = left;
+
+    left->next = new_node;
+
+    return new_node;
 }
 
 //
@@ -1450,9 +1669,9 @@ int sub_target_count(tree_node* node)
 }
 
 // Gather a cumulative list in target_list of all non-virtual descendants of node
-tree_node** sub_target_list(tree_node* node)
+destination_t** sub_target_list(tree_node* node)
 {    
-    tree_node** target_list = malloc(sizeof(tree_node*) * sub_target_count(node));
+    destination_t** target_list = malloc(sizeof(destination_t*) * sub_target_count(node));
     int current = 0;
 
     accumulate_target_list(node, target_list, &current);
@@ -1461,10 +1680,10 @@ tree_node** sub_target_list(tree_node* node)
 }
 
 // Recursively accumulate non-virtual descendants of node
-void accumulate_target_list(tree_node* node, tree_node** target_list, int* current)
+void accumulate_target_list(tree_node* node, destination_t** target_list, int* current)
 {
     if(!node->isVirtual){
-        target_list[(*current)++] = node;
+        target_list[(*current)++] = &node->location;
     }
 
     int i;
@@ -2925,13 +3144,12 @@ void gg_post_nodes(call_t *call)
 
     if((graph_gg = fopen(name, "a")) == NULL)
     {
-	fprintf(stderr, "[ERR] Couldn't open file %s\nError opening postscript "
-	    "file\n", name);
+	fprintf(stderr, "[ERR] Couldn't open file %s\nError opening postscript file\n", name);
 	return;
     }
 
     if(call->node == 0)
-	fprintf(graph_gg, "1 0 0 setrgbcolor %lf %lf 4 0 360 arc fill stroke\n0"	    " 0 0 setrgbcolor\n", pos->x * entity_data->scale_postscript + 15.0,
+	fprintf(graph_gg, "1 0 0 setrgbcolor %lf %lf 4 0 360 arc fill stroke\n0 0 0 setrgbcolor\n", pos->x * entity_data->scale_postscript + 15.0,
 	    pos->y * entity_data->scale_postscript + 15.0);
     else
 	fprintf(graph_gg, "%lf %lf 2.5 0 360 arc fill stroke\n", pos->x *
