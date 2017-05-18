@@ -9,8 +9,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include "../linked_list.c"
 
 #include <include/modelutils.h>
+
 #define LOG_ROUTING
 //#define DBG_STEINER
 ////////////////////////////////////////////////////////////////////////////////
@@ -117,12 +119,11 @@ typedef struct
     bool active;
 } steiner_tuple;
 
-//linked-list of pivots
-typedef struct ll_node{
-    tree_node* current;
-    struct ll_node* next;
-    struct ll_node* prev;
-} pivot_list_node;
+typedef struct
+{
+    tree_node* pivot;
+    destination_t* target;
+} spawn_request;
 
 //packet information needed for routing
 typedef struct
@@ -139,7 +140,10 @@ typedef struct
     void *path;
     int target_count;
     destination_t** target_list;
+    int destination_count;
+    destination_t** destination_list;
     tree_node* root;
+    bool face_mode;
 }header_t;
 
 //Global node data, used for tracking information known to node
@@ -222,9 +226,6 @@ double compute_distance(tree_node* a, tree_node* b);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
-pivot_list_node* generate_pivot(tree_node* d);
-pivot_list_node* remove_pivot(pivot_list_node* discarded);
-pivot_list_node* add_pivot(pivot_list_node* left, tree_node* addition);
 bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check);
 
 //routing functions - cfr/flood
@@ -253,6 +254,7 @@ mate_e sf_find_mate(call_t *call, packet_t *packet);
 
 //general helper functions
 double absolute_value(double n);
+void* das_select(void *das, int index);
 bool compare_positions(position_t *l, position_t *r);
 bool compare_destinations(destination_t *l, destination_t *r);
 intersection_e check_intersect(call_t *call, destination_t *source,
@@ -502,7 +504,10 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->ttl = DEFAULT_TTL;
     header->path = NULL;
     header->target_count = dest->id;
+    header->destination_count = dest->id;
     header->target_list = malloc(sizeof(destination_t*) * header->target_count);
+    header->destination_list = malloc(sizeof(destination_t*) * header->destination_count);
+    header->face_mode = false;
 
     // Generate target list
     int i = 0, di = 0;
@@ -517,7 +522,8 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
 	tmp = NEW(destination_t);
 	tmp->id = i + di;
 	tmp->position = *get_node_position(i + di);
-	header->target_list[i] = tmp;	    
+	header->target_list[i] = tmp;
+	header->destination_list[i] = tmp;
     }
 
     header->root = build_steiner_tree(&header->src, header->target_list, header->target_count);
@@ -1077,9 +1083,6 @@ void tx(call_t *call, packet_t *packet)
     return;
 }
 
-void das_create(){
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 // Routing Functions - GMP
 
@@ -1089,9 +1092,9 @@ void forward(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
-
-    int i, c;
-    bool removing_first_pivot;
+    void* requests = das_create();
+    spawn_request* request;
+    int i, c, pivot_index = 0;
 
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] target list(%d):\n", header->target_count);
@@ -1109,38 +1112,44 @@ void forward(call_t *call, packet_t *packet)
     }
 
     // Generate pivot list (all children of root in tree)
-    pivot_list_node* pivots = generate_pivot(header->root->children[0]);
-    pivot_list_node* pivot = NULL, *last = pivots;
+    void* pivots = das_create();
+    tree_node* pivot = NULL;
 
-
-    for(i = 1; i < header->root->child_count; i++){
-        last = add_pivot(last, header->root->children[i]);
+    for(i = 0; i < header->root->child_count; i++){
+        das_insert(pivots, (void*)header->root->children[i]);
     }
 
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] Begin routing on pivot list:\n");
-    pivot = pivots;
-    while(pivot != NULL){
-        fprintf(stderr, "         %d (%f, %f)\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
-        pivot = pivot->next;
+    das_init_traverse(pivots);
+    while((pivot = (tree_node*)das_traverse(pivots)) != NULL){
+        fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
     }
 #endif
 
+    
+
     // Route each pivot
-    pivot = pivots;
-    while(pivot != NULL){
+    while(pivot_index < das_getsize(pivots)){
+	pivot = (tree_node*)das_select(pivots, pivot_index);
+
+	if(pivot == NULL){
+	    fprintf(stderr, "Called for pivot index %d, passed the end of the pivot list with size %d.\n", pivot_index, das_getsize(pivots));
+	    return;
+	}
+
 	// If pivot has already been successfully reached
-        if(compare_destinations(&pivot->current->location, &my_pos)){
-            for(c = 0; c < pivot->current->child_count; c++){
-                last = add_pivot(last, pivot->current->children[c]);
+        if(compare_destinations(&pivot->location, &my_pos)){
+	    // Add its children to pivot list, then remove it.
+            for(c = 0; c < pivot->child_count; c++){
+		das_insert(pivots, (void*)pivot->children[c]);
+		add_child(header->root, pivot->children[c]);
+		remove_child(pivot, 0);
 	    }
 #ifdef LOG_ROUTING
-	    fprintf(stderr, "Successfully delivered to destination %d.\n", my_pos.id);
+	    fprintf(stderr, "[RTG] Successfully delivered to destination %d.\n", my_pos.id);
 #endif
-
-	    removing_first_pivot = pivot == pivots;
-	    pivot = remove_pivot(pivot);
-	    if(removing_first_pivot) pivots = pivot;
+	    das_delete(pivots, (void*)pivot);
         }
 	// Otherwise, deliver to next node
         else{
@@ -1152,18 +1161,18 @@ void forward(call_t *call, packet_t *packet)
 	    das_init_traverse(node_data->gg_list);
 
 #ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] Looking for greedy neighbor for pivot %d (%f, %f) -\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
+	    fprintf(stderr, "[RTG] Looking for greedy neighbor for pivot %d (%f, %f) -\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
 #endif
 	    for(i = 0; i < size; ++i){
 		gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
 
                 // If the total distance of all pivot sub-destinations is less for the target node than the current
 		// position, consider this node when calculating the closest neighbor to the pivot.
-                if(distance_sum(pivot->current, gg_nbr->position) < distance_sum(pivot->current, my_pos.position)){
+                if(distance_sum(pivot, gg_nbr->position) < distance_sum(pivot, my_pos.position)){
 #ifdef LOG_ROUTING
-		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, distance(&gg_nbr->position, &pivot->current->location.position));
+		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, distance(&gg_nbr->position, &pivot->location.position));
 #endif
-		    if(next == NULL || distance(&gg_nbr->position, &pivot->current->location.position) < distance(&next->position, &pivot->current->location.position)){
+		    if(next == NULL || distance(&gg_nbr->position, &pivot->location.position) < distance(&next->position, &pivot->location.position)){
 #ifdef LOG_ROUTING
 			fprintf(stderr, "Chosen");
 #endif
@@ -1178,45 +1187,30 @@ void forward(call_t *call, packet_t *packet)
 
             // If a greedy neighbor is successfully found for this pivot ...
             if(next != NULL){
-		if(false){ // Eventual face stuff ...
-		}
-		else{
-		    // Send split-off pivot to chosen neighbor
-		    // Gather non-virtual sub-destinations of pivot		  
-		    destination_t** vp = sub_target_list(pivot->current);
-		    int vp_count = sub_target_count(pivot->current);
+		// Add a request to send this pivot to the greedy neighbor
+		request = NEW(spawn_request*);
+		request->pivot = pivot;
+		request->target = next;
+
+		das_insert(requests, (void*)request);
 
 #ifdef LOG_ROUTING
-                    fprintf(stderr, "[RTG] Sending pivot %d to best neighbor %d\n", pivot->current->location.id, next->id);
+		fprintf(stderr, "[RTG] Adding spawn request <P %d, T %d>\n", pivot->location.id, next->id);
 #endif
-		    // Send to greedy neighbor
-		    packet_t* spawn_packet = copy_packet(call, packet, header, INCREMENT);
-		    header_t* spawn_header = PACKET_HEADER(spawn_packet, node_data);
-
-		    spawn_header->sender = my_pos;
-		    spawn_header->next_node = *next;
-		    spawn_header->target_list = vp;
-		    spawn_header->target_count = vp_count;
-		    spawn_header->root = build_steiner_tree(next, vp, vp_count);
-
-		    if(set_mac_header_tx(call, spawn_packet) == ERROR)
-			fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
-
-		    // remove delivered pivot
-	    	    removing_first_pivot = pivot == pivots;
-	            pivot = remove_pivot(pivot);
-	            if(removing_first_pivot) pivots = pivot;		    
-		}
+		
+		// remove successfully directed pivot
+		das_delete(pivots, (void*)pivot);		
 	    }
 	    // Failed greedy routing ... Checking if failed pivot has any children
-            else if(pivot->current->child_count != 0){
+            else if(pivot->child_count != 0){
 
 		// Choose last child, and reattach to root.
 		// Next iteration will continue to attempt routing of this same pivot.
-		tree_node* last_child = pivot->current->children[pivot->current->child_count - 1];
+		tree_node* last_child = pivot->children[pivot->child_count - 1];
 
-		remove_child(pivot->current, pivot->current->child_count - 1);
-		last = add_pivot(last, last_child);
+		das_insert(pivots, (void*)last_child);
+		remove_child(pivot, pivot->child_count - 1);
+		add_child(header->root, last_child);
 
 #ifdef LOG_ROUTING
 		fprintf(stderr, "[RTG] Failed greedy routing ... reattaching child %d (%f, %f)\n", last_child->location.id, last_child->location.position.x, last_child->location.position.y);
@@ -1224,35 +1218,32 @@ void forward(call_t *call, packet_t *packet)
 
 		// If we have just detached a child from a virtual split, remove
 		// the now unnecessary virtual node
-		if(pivot->current->child_count == 1 && pivot->current->isVirtual){
+		if(pivot->child_count == 1 && pivot->isVirtual){
 #ifdef LOG_ROUTING
-		    fprintf(stderr, "[RTG] Remaining parent is a virtual split. Reattaching remaining child %d.\n", pivot->current->children[0]->location.id);
+		    fprintf(stderr, "[RTG] Remaining parent is a virtual split. Reattaching remaining child %d.\n", pivot->children[0]->location.id);
 #endif
-		    last = add_pivot(last, pivot->current->children[0]);
-
-	    	    removing_first_pivot = pivot == pivots;
-	    	    pivot = remove_pivot(pivot);
-	    	    if(removing_first_pivot) pivots = pivot;
+		    add_child(header->root, pivot->children[0]);
+		    das_insert(pivots, (void*)pivot->children[0]);
+		    remove_child(pivot, 0);
+		    das_delete(pivots, (void*)pivot);
 		}
 	    }
 	    // Failed greedy routing, and pivot is childless
 	    else{
 		// If virtual, remove it
-		if(pivot->current->isVirtual){
+		if(pivot->isVirtual){
 
 #ifdef LOG_ROUTING
 		fprintf(stderr, "[RTG] Failed greedy routing ... removing virtual childess pivot.\n");
 #endif
-	    	    removing_first_pivot = pivot == pivots;
-	            pivot = remove_pivot(pivot);
-	            if(removing_first_pivot) pivots = pivot;		    
+		    das_delete(pivots, (void*)pivot);
 		}
 		// Otherwise, skip this pivot for now
 		else{
 #ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] Failed greedy routing ... Skipping this pivot.\n");
+		    fprintf(stderr, "[RTG] Failed greedy routing ... Skipping this pivot.\n");
 #endif
-		pivot = pivot->next;
+		    pivot_index++;
 		}		
 	    }
         }
@@ -1260,54 +1251,122 @@ void forward(call_t *call, packet_t *packet)
     }
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Main pivot loop complete.\n");
-
-    if(pivots != NULL){
-        fprintf(stderr, "[RTG] Remaining pivots:\n");
-        pivot = pivots;
-        while(pivot != NULL){
-            fprintf(stderr, "         %d (%f, %f)\n", pivot->current->location.id, pivot->current->location.position.x, pivot->current->location.position.y);
-            pivot = pivot->next;
+    fprintf(stderr, "[RTG] Main pivot loop completed with spawn %d requests.", das_getsize(requests));
+    if(das_getsize(requests) > 0){
+	fprintf(stderr, ":\n");
+	das_init_traverse(requests);
+        while((request = (spawn_request*)das_traverse(requests)) != NULL){
+            fprintf(stderr, "         (%d, %d)\n", request->pivot->location.id, request->target->id);
         }
+    }
+    else{
+	fprintf(stderr, "\n");
     }
 #endif
 
+    bool release = true;
+
+    // If currently face routing, determine whether to continue previous face routing.
+    if(header->face_mode){
+
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG] Determining if continue bundled face routing occurs ... \n");
+#endif
+
+	// If there are any requests to even send out, check that this is not a continued face routing
+	if(das_getsize(requests) > 0){
+	    das_init_traverse(requests);
+	    int first_target = ((spawn_request*)das_traverse(requests))->target->id;
+
+	    // If collective greedy decisions are making any progress, or not all pivots are travelling in the
+	    // same direction, fulfill the requests. Otherwise, it is a continued face routing.
+
+	    if (first_target == header->sender.id && das_getsize(requests) == header->target_count){
+		release = false;
+
+		while((request = (spawn_request*)das_traverse(requests)) != NULL){
+		    if(request->target->id != first_target){
+			release = true;
+			break;
+		    }
+		}
+	    }
+	}
+	else{
+	    release = false;
+	}
+    }
+    
+    if(release){
+    	// Found not to be a continued face routing; honor requests.
+
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG] Sending out requested pivot spawns ... \n");
+#endif
+
+	das_init_traverse(requests);
+	while((request = (spawn_request*)das_traverse(requests)) != NULL){
+	    // Send split-off pivot to chosen neighbor
+	    // Gather non-virtual sub-destinations of pivot		  
+	    destination_t** vp = sub_target_list(request->pivot);
+	    int vp_count = sub_target_count(request->pivot);
+
+#ifdef LOG_ROUTING
+            fprintf(stderr, "[RTG] Sending pivot %d to best neighbor %d\n", request->pivot->location.id, request->target->id);
+	    fprintf(stderr, "         With destinations:\n");
+	    for(i = 0; i < vp_count; i++){
+	    	fprintf(stderr, "            %d\n", vp[i]->id);
+	    }
+#endif
+	    // Send to greedy neighbor
+	    packet_t* spawn_packet = copy_packet(call, packet, header, INCREMENT);
+	    header_t* spawn_header = PACKET_HEADER(spawn_packet, node_data);
+
+	    spawn_header->sender = my_pos;
+	    spawn_header->next_node = *(request->target);
+	    spawn_header->face_mode = false;
+	    spawn_header->target_list = vp;
+	    spawn_header->target_count = vp_count;
+	    spawn_header->root = build_steiner_tree(request->target, vp, vp_count);
+
+	    if(set_mac_header_tx(call, spawn_packet) == ERROR)
+		fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
+	}
+
+	// Now, initiate a face routing for any leftover pivots which were not successfully greedily routed.
+    	if(das_getsize(pivots) > 0){
+#ifdef LOG_ROUTING
+            fprintf(stderr, "[RTG] Face routing remaining pivots:\n");
+#endif
+            das_init_traverse(pivots);
+            while((pivot = (tree_node*)das_traverse(pivots)) != NULL){
+
+#ifdef LOG_ROUTING
+                fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
+#endif
+
+		// Start face routeeeee
+            }
+        }
+    }
+    else{
+	// determine next neighbor according to face routing.
+	destination_t face_next;
+
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG] Appears to be a continued face routing; continuing routing to %d\n", 0);
+#endif
+    }
+
+    // Cleanup
+    das_destroy(pivots);
+    das_init_traverse(requests);
+    while((request = (spawn_request*)das_traverse(requests)) != NULL){
+    	free(request);
+    }
+    das_destroy(requests);
+
     return;
-}
-
-// Generate a pivot from a tree node destination
-pivot_list_node* generate_pivot(tree_node* d){
-    pivot_list_node* pivot = NEW(pivot_list_node);
-    pivot->current = d;
-    pivot->next = NULL;
-    pivot->prev = NULL;
-
-    return pivot;
-}
-
-// Remove a pivot from the linked list
-pivot_list_node* remove_pivot(pivot_list_node* discarded){
-    if(discarded->prev != NULL){
-        discarded->prev->next = discarded->next;
-    }
-
-    if(discarded->next != NULL){
-        discarded->next->prev = discarded->prev;
-    }
-
-    return discarded->next;
-}
-
-// Add a pivot to a linked list of pivots
-pivot_list_node* add_pivot(pivot_list_node* left, tree_node* addition){
-    pivot_list_node* new_node = NEW(pivot_list_node);
-    new_node->current = addition;
-    new_node->next = NULL;
-    new_node->prev = left;
-
-    left->next = new_node;
-
-    return new_node;
 }
 
 //
@@ -2687,7 +2746,6 @@ void rx(call_t *call, packet_t *packet)
     header_t *header = PACKET_HEADER(packet, node_data);
     array_t *up = get_entity_bindings_up(call);
     destination_t me = THIS_DESTINATION(call);
-    mate_e result;
     int i = up->size;
 
     switch(header->type)
@@ -2705,7 +2763,7 @@ void rx(call_t *call, packet_t *packet)
 	    if(packet_lost(call))
 	    {
 #ifdef LOG_ROUTING
-		PRINT_ROUTING("[RTG] packet from %d to %d lost\n",
+		fprintf(stderr, "[RTG] packet from %d to %d lost\n",
 		    header->sender.id, call->node);
 #endif
 		packet_dealloc(packet);
@@ -2716,16 +2774,10 @@ void rx(call_t *call, packet_t *packet)
 	    header->ttl--;
 	    if(header->ttl != 0)
 	    {
-		//check for mates, if new packet was dropped break
-		result = (flooding_packet(call, packet) ? sf_find_mate(call, packet) : find_mate(call, packet));
-		if(result == FOUND_OTHER_1)
-		    break;
-		//if mates not found, or mates found but new packet not dropped
-		if(result != FOUND_THIS)
-	            tx(call, packet);
-		//if calling node is destination we need to keep routing packet
-		//but also deliver packet, so fall through to deliver case
-		if(!check_in_target_list(header->target_list, header->target_count, &me))
+		// forward
+	        tx(call, packet);
+
+		if(!check_in_target_list(header->destination_list, header->destination_count, &me))
 		    break;
 	    }
 	    else
@@ -2741,11 +2793,10 @@ void rx(call_t *call, packet_t *packet)
 		    break;
 		}
 	    }
-	    if(call->node == header->src.id)
-		break;
+
 	case LM_PACKET:
 #ifdef LOG_ROUTING
-	    PRINT_ROUTING("[RTG] delivering packet at %d\n", call->node);
+	    fprintf(stderr, "[RTG] delivering packet at %d\n", call->node);
 #endif
 	    if(header->type == LM_PACKET)
 		entity_data->total_num_hops++;
@@ -2958,6 +3009,19 @@ mate_e sf_find_mate(call_t *call, packet_t *packet)
 double absolute_value(double n){
     if(n < 0) n *= -1;
     return n;
+}
+
+//select an item in a das 'index' number of items from the initial position
+void* das_select(void* das, int index){
+    void* selection = NULL;
+    int i = 0;
+
+    das_init_traverse(das);
+    while((selection = das_traverse(das)) != NULL){
+        if(i++ == index) break;
+    }
+
+    return selection;
 }
 
 //cpmpares two positions
