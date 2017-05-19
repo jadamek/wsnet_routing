@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
-#include "../linked_list.c"
+#include "../linked_list/linked_list.c"
 
 #include <include/modelutils.h>
 
@@ -222,7 +222,8 @@ double get_acute_angle_triple(position_t a, position_t b, position_t c);
 position_t equillateral_third(position_t a, position_t b, position_t c);
 position_t get_intersection_point(position_t a1, position_t a2, position_t b1, position_t b2);	
 tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c);
-double compute_distance(tree_node* a, tree_node* b);
+double compute_node_distance(tree_node* a, tree_node* b);
+double compute_distance(position_t a, position_t b);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
@@ -237,6 +238,7 @@ void spray_packets(call_t *call, packet_t *packet);
 void sf_spray_packets(call_t *call, packet_t *packet);
 bool greedy_forward(call_t *call, packet_t *packet);
 void face_forward(call_t *call, packet_t *packet);
+void gfg_forward(call_t *call, packet_t *packet);
 void forward_packet(call_t *call, packet_t *packet, direction_e direction);
 void deliver_packet(call_t *call, packet_t *packet);
 bool combine_packets(call_t *call, destination_t *sender,
@@ -796,8 +798,8 @@ void planarize_graph(call_t *call)
     int i;
     for(i = 0; i < get_node_count(); ++i)
     {
-	if(i != call->node && distance(get_node_position(call->node),
-	    get_node_position(i)) <= RADIO_RANGE)
+	if(i != call->node && compute_distance(*get_node_position(call->node),
+	    *get_node_position(i)) <= RADIO_RANGE)
 	{
 #ifdef LOG_ROUTING
 	    PRINT_ROUTING("[RTG] GG: node %d adds %d to neighbor list\n",
@@ -825,13 +827,13 @@ void planarize_graph(call_t *call)
 	center.x = (tmp->position.x + my_pos.position.x) / 2;
 	center.y = (tmp->position.y + my_pos.position.y) / 2;
 	center.z = (tmp->position.z + my_pos.position.z) / 2;
-	double radius = distance(&center, &my_pos.position);
+	double radius = compute_distance(center, my_pos.position);
 
 	bool witness = false;
 	das_init_traverse(node_data->nbrs);
 	while((tmp2 = (destination_t*)das_traverse(node_data->nbrs)) != NULL)
 	{
-	    if(tmp2->id != tmp->id && distance(&tmp2->position, &center)
+	    if(tmp2->id != tmp->id && compute_distance(tmp2->position, center)
 		<= radius)
 	    {
 		witness = true;
@@ -1073,11 +1075,18 @@ void tx(call_t *call, packet_t *packet)
 	return;
     }
 
+    if(header->target_count == 1){
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG] GFG routing single target %d at %d\n", header->target_list[0]->id, call->node);
+#endif
+	gfg_forward(call, packet);
+    }
+    else{
 #ifdef LOG_ROUTING
         fprintf(stderr, "[RTG] GMP routing packet at %d\n", call->node);
 #endif
         forward(call, packet);
-    
+    }
 
 //getchar();
     return;
@@ -1092,7 +1101,7 @@ void forward(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
-    void* requests = das_create();
+    linked_list* requests = create_linked_list();
     spawn_request* request;
     int i, c, pivot_index = 0;
 
@@ -1112,17 +1121,17 @@ void forward(call_t *call, packet_t *packet)
     }
 
     // Generate pivot list (all children of root in tree)
-    void* pivots = das_create();
+    linked_list* pivots = create_linked_list();
     tree_node* pivot = NULL;
 
     for(i = 0; i < header->root->child_count; i++){
-        das_insert(pivots, (void*)header->root->children[i]);
+	list_push_back(pivots, (void*)header->root->children[i]);
     }
 
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] Begin routing on pivot list:\n");
-    das_init_traverse(pivots);
-    while((pivot = (tree_node*)das_traverse(pivots)) != NULL){
+    list_start_traversal(pivots);
+    while((pivot = (tree_node*)list_traverse(pivots)) != NULL){
         fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
     }
 #endif
@@ -1130,11 +1139,11 @@ void forward(call_t *call, packet_t *packet)
     
 
     // Route each pivot
-    while(pivot_index < das_getsize(pivots)){
-	pivot = (tree_node*)das_select(pivots, pivot_index);
+    while(pivot_index < list_size(pivots)){
+	pivot = (tree_node*)list_at(pivots, pivot_index);
 
 	if(pivot == NULL){
-	    fprintf(stderr, "Called for pivot index %d, passed the end of the pivot list with size %d.\n", pivot_index, das_getsize(pivots));
+	    fprintf(stderr, "Called for pivot index %d, passed the end of the pivot list with size %d.\n", pivot_index, list_size(pivots));
 	    return;
 	}
 
@@ -1142,14 +1151,14 @@ void forward(call_t *call, packet_t *packet)
         if(compare_destinations(&pivot->location, &my_pos)){
 	    // Add its children to pivot list, then remove it.
             for(c = 0; c < pivot->child_count; c++){
-		das_insert(pivots, (void*)pivot->children[c]);
+		list_push_back(pivots, (void*)pivot->children[c]);
 		add_child(header->root, pivot->children[c]);
 		remove_child(pivot, 0);
 	    }
 #ifdef LOG_ROUTING
 	    fprintf(stderr, "[RTG] Successfully delivered to destination %d.\n", my_pos.id);
 #endif
-	    das_delete(pivots, (void*)pivot);
+	    list_remove(pivots, (void*)pivot);
         }
 	// Otherwise, deliver to next node
         else{
@@ -1170,9 +1179,9 @@ void forward(call_t *call, packet_t *packet)
 		// position, consider this node when calculating the closest neighbor to the pivot.
                 if(distance_sum(pivot, gg_nbr->position) < distance_sum(pivot, my_pos.position)){
 #ifdef LOG_ROUTING
-		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, distance(&gg_nbr->position, &pivot->location.position));
+		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, compute_distance(gg_nbr->position, pivot->location.position));
 #endif
-		    if(next == NULL || distance(&gg_nbr->position, &pivot->location.position) < distance(&next->position, &pivot->location.position)){
+		    if(next == NULL || compute_distance(gg_nbr->position, pivot->location.position) < compute_distance(next->position, pivot->location.position)){
 #ifdef LOG_ROUTING
 			fprintf(stderr, "Chosen");
 #endif
@@ -1192,14 +1201,14 @@ void forward(call_t *call, packet_t *packet)
 		request->pivot = pivot;
 		request->target = next;
 
-		das_insert(requests, (void*)request);
+		list_push_back(requests, (void*)request);
 
 #ifdef LOG_ROUTING
 		fprintf(stderr, "[RTG] Adding spawn request <P %d, T %d>\n", pivot->location.id, next->id);
 #endif
 		
 		// remove successfully directed pivot
-		das_delete(pivots, (void*)pivot);		
+		list_remove(pivots, (void*)pivot);		
 	    }
 	    // Failed greedy routing ... Checking if failed pivot has any children
             else if(pivot->child_count != 0){
@@ -1208,7 +1217,7 @@ void forward(call_t *call, packet_t *packet)
 		// Next iteration will continue to attempt routing of this same pivot.
 		tree_node* last_child = pivot->children[pivot->child_count - 1];
 
-		das_insert(pivots, (void*)last_child);
+		list_push_back(pivots, (void*)last_child);
 		remove_child(pivot, pivot->child_count - 1);
 		add_child(header->root, last_child);
 
@@ -1223,9 +1232,9 @@ void forward(call_t *call, packet_t *packet)
 		    fprintf(stderr, "[RTG] Remaining parent is a virtual split. Reattaching remaining child %d.\n", pivot->children[0]->location.id);
 #endif
 		    add_child(header->root, pivot->children[0]);
-		    das_insert(pivots, (void*)pivot->children[0]);
+		    list_push_back(pivots, (void*)pivot->children[0]);
 		    remove_child(pivot, 0);
-		    das_delete(pivots, (void*)pivot);
+		    list_remove(pivots, (void*)pivot);
 		}
 	    }
 	    // Failed greedy routing, and pivot is childless
@@ -1236,7 +1245,7 @@ void forward(call_t *call, packet_t *packet)
 #ifdef LOG_ROUTING
 		fprintf(stderr, "[RTG] Failed greedy routing ... removing virtual childess pivot.\n");
 #endif
-		    das_delete(pivots, (void*)pivot);
+		    list_remove(pivots, (void*)pivot);
 		}
 		// Otherwise, skip this pivot for now
 		else{
@@ -1251,11 +1260,11 @@ void forward(call_t *call, packet_t *packet)
     }
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Main pivot loop completed with spawn %d requests.", das_getsize(requests));
-    if(das_getsize(requests) > 0){
+    fprintf(stderr, "[RTG] Main pivot loop completed with spawn %d requests.", list_size(requests));
+    if(list_size(requests) > 0){
 	fprintf(stderr, ":\n");
-	das_init_traverse(requests);
-        while((request = (spawn_request*)das_traverse(requests)) != NULL){
+	list_start_traversal(requests);
+        while((request = (spawn_request*)list_traverse(requests)) != NULL){
             fprintf(stderr, "         (%d, %d)\n", request->pivot->location.id, request->target->id);
         }
     }
@@ -1272,19 +1281,28 @@ void forward(call_t *call, packet_t *packet)
 #ifdef LOG_ROUTING
 	fprintf(stderr, "[RTG] Determining if continue bundled face routing occurs ... \n");
 #endif
-
+		
 	// If there are any requests to even send out, check that this is not a continued face routing
-	if(das_getsize(requests) > 0){
-	    das_init_traverse(requests);
-	    int first_target = ((spawn_request*)das_traverse(requests))->target->id;
+	if(list_size(requests) > 0){
+
+	    // Gather number of targets current requests cover
+            int requested_targets = 0;	
+
+	    list_start_traversal(requests);
+	    while((request = (spawn_request*)list_traverse(requests)) != NULL){
+		requested_targets += sub_target_count(request->pivot);
+	    }
+
+	    list_start_traversal(requests);
+	    int first_target = ((spawn_request*)list_traverse(requests))->target->id;
 
 	    // If collective greedy decisions are making any progress, or not all pivots are travelling in the
 	    // same direction, fulfill the requests. Otherwise, it is a continued face routing.
 
-	    if (first_target == header->sender.id && das_getsize(requests) == header->target_count){
+	    if (first_target == header->sender.id && requested_targets == header->target_count){
 		release = false;
 
-		while((request = (spawn_request*)das_traverse(requests)) != NULL){
+		while((request = (spawn_request*)list_traverse(requests)) != NULL){
 		    if(request->target->id != first_target){
 			release = true;
 			break;
@@ -1304,8 +1322,8 @@ void forward(call_t *call, packet_t *packet)
 	fprintf(stderr, "[RTG] Sending out requested pivot spawns ... \n");
 #endif
 
-	das_init_traverse(requests);
-	while((request = (spawn_request*)das_traverse(requests)) != NULL){
+	list_start_traversal(requests);
+	while((request = (spawn_request*)list_traverse(requests)) != NULL){
 	    // Send split-off pivot to chosen neighbor
 	    // Gather non-virtual sub-destinations of pivot		  
 	    destination_t** vp = sub_target_list(request->pivot);
@@ -1329,42 +1347,150 @@ void forward(call_t *call, packet_t *packet)
 	    spawn_header->target_count = vp_count;
 	    spawn_header->root = build_steiner_tree(request->target, vp, vp_count);
 
+	    // If there is only a single target left, will be GFG routed directly to that target
+	    if(vp_count == 1) header->dest = *(vp[0]);
+
 	    if(set_mac_header_tx(call, spawn_packet) == ERROR)
 		fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
 	}
 
 	// Now, initiate a face routing for any leftover pivots which were not successfully greedily routed.
-    	if(das_getsize(pivots) > 0){
+    	if(list_size(pivots) > 0){
+
 #ifdef LOG_ROUTING
             fprintf(stderr, "[RTG] Face routing remaining pivots:\n");
 #endif
-            das_init_traverse(pivots);
-            while((pivot = (tree_node*)das_traverse(pivots)) != NULL){
+
+	    // Gather non-virtual sub-destinations		  
+	    int vp_count = list_size(pivots);
+	    destination_t** vp = malloc(sizeof(destination_t*) * vp_count);
+	    i = 0;
+
+            list_start_traversal(pivots);
+            while((pivot = (tree_node*)list_traverse(pivots)) != NULL){
 
 #ifdef LOG_ROUTING
                 fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
 #endif
-
-		// Start face routeeeee
+		vp[i++] = &pivot->location;
             }
+
+	    // Start face routing
+	    // Compute the centroid of all targets as the collective FACE-routing destination
+	    double centroid_x = 0;
+	    double centroid_y = 0;
+
+	    for(i = 0; i < vp_count; i++){
+		centroid_x += vp[i]->position.x;
+		centroid_y += vp[i]->position.y;
+	    }
+	    centroid_x /= vp_count;
+	    centroid_y /= vp_count;
+
+	    position_t centroid_pos = {centroid_x, centroid_y, 0};
+	    destination_t centroid = {-3, centroid_pos};
+
+	    header->dest = centroid;
+
+	    // Choose best direction to face route in
+	    destination_t leftChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_L);
+            destination_t rightChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_R);
+
+            if(get_acute_angle_triple(leftChoice.position, my_pos.position, centroid_pos) < get_acute_angle_triple(rightChoice.position, my_pos.position, centroid_pos)){
+                header->direction = TRAVERSE_L;
+                header->next_node = leftChoice;
+            }
+            else{
+                header->direction = TRAVERSE_R;
+                header->next_node = rightChoice;
+            }
+
+	    // Forward face-routing GMP packet
+	    header->sender = my_pos;
+	    header->face_mode = true;
+	    header->target_list = vp;
+	    header->target_count = vp_count;
+	    header->root = build_steiner_tree(&header->next_node, vp, vp_count);
+
+	    if(set_mac_header_tx(call, packet) == ERROR)
+		fprintf(stderr, "[ERR] Can't route GMP-Face spawn.\n");
+
         }
     }
     else{
 	// determine next neighbor according to face routing.
-	destination_t face_next;
+	destination_t face_next = next_on_face(call, &my_pos, &header->sender, header->direction);
 
 #ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG] Appears to be a continued face routing; continuing routing to %d\n", 0);
+	fprintf(stderr, "[RTG] Appears to be a continued face routing; continuing routing to %d\n", face_next.id);
 #endif
+
+	header->root = build_steiner_tree(&face_next, header->target_list, header->target_count);
+	face_forward(call, packet);
     }
 
     // Cleanup
-    das_destroy(pivots);
-    das_init_traverse(requests);
-    while((request = (spawn_request*)das_traverse(requests)) != NULL){
-    	free(request);
+    list_clear(pivots);
+    free(pivots);
+    list_clean(requests);
+
+    return;
+}
+
+// Forward according to GFG (greedy-face-greedy)
+void gfg_forward(call_t *call, packet_t *packet){
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call);
+
+    // If successfully reached target, STOP
+    if(compare_destinations(&my_pos, &header->dest)) return;
+
+    // If in Greedy mode, or if progress toward destination was made since the last switch to Face mode, route greedily
+    if(header->mode == GREEDY || (compute_distance(my_pos.position, header->dest.position) < compute_distance(my_pos.position, header->check_point.position))){
+        if(header->mode == FACE){
+#ifdef LOG_ROUTING
+            fprintf(stderr, "[RTG] Made progress toward destination with face routing. Switching back to greedy mode.\n");
+#endif
+            header->mode = GREEDY;
+        }
+
+        // Succeeded greedy forwarding
+        if(greedy_forward(call, packet)){
+            return;
+        }
+        // Failed greedy forwarding; switch to FACE mode
+        else{
+            header->check_point = my_pos;
+            header->mode = FACE;
+
+            // Choose best direction to start face routing in
+            destination_t leftChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_L);
+            destination_t rightChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_R);
+
+            if(get_acute_angle_triple(header->dest.position, my_pos.position, leftChoice.position) < get_acute_angle_triple(header->dest.position, my_pos.position, rightChoice.position)){
+                header->direction = TRAVERSE_L;
+                header->next_node = leftChoice;
+            }
+            else{
+                header->direction = TRAVERSE_R;
+                header->next_node = rightChoice;
+            }
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
+#endif
+
+            header->sender = my_pos;
+            if(set_mac_header_tx(call, packet) == ERROR)
+                fprintf(stderr, "[ERR] Can't route packet\n");
+
+            return;
+        }
     }
-    das_destroy(requests);
+    // Otherwise, face route
+    else{
+        face_forward(call, packet);
+    }
 
     return;
 }
@@ -1477,7 +1603,7 @@ tree_node* build_steiner_tree(destination_t* source, destination_t** target_list
 	    clean = true;
         }
 	// A5 : IF d(s, u) < R && d(s, v) < R, then remove this tuple
-        else if(compute_distance(s, best->u) < RADIO_RANGE && compute_distance(s, best->v) < RADIO_RANGE){
+        else if(compute_node_distance(s, best->u) < RADIO_RANGE && compute_node_distance(s, best->v) < RADIO_RANGE){
 #ifdef DGB_STEINER
 	    fprintf(stderr, "[STN] A5\n");
 #endif
@@ -1486,9 +1612,9 @@ tree_node* build_steiner_tree(destination_t* source, destination_t** target_list
 	    clean_pairs = true;
         }
         // A6 : IF only d(s, u) < R :
-	else if(compute_distance(s, best->u) < RADIO_RANGE){
+	else if(compute_node_distance(s, best->u) < RADIO_RANGE){
 	    // A6-a : IF R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then remove this tuple
-	    if(RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v)){
+	    if(RADIO_RANGE + compute_node_distance(best->t, best->u) + compute_node_distance(best->t, best->v) > compute_node_distance(s, best->u) + compute_node_distance(s, best->v)){
 #ifdef DGB_STEINER
 	    	fprintf(stderr, "[STN] A6-a\n");
 #endif
@@ -1506,9 +1632,9 @@ tree_node* build_steiner_tree(destination_t* source, destination_t** target_list
 	   }
 	}
         // A7 : IF only d(s, v) < R :
-	else if(compute_distance(s, best->v) < RADIO_RANGE){
+	else if(compute_node_distance(s, best->v) < RADIO_RANGE){
 	    // A7-a : IF R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then remove this tuple
-	    if(RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v)){
+	    if(RADIO_RANGE + compute_node_distance(best->t, best->u) + compute_node_distance(best->t, best->v) > compute_node_distance(s, best->u) + compute_node_distance(s, best->v)){
 #ifdef DGB_STEINER
 	    	fprintf(stderr, "[STN] A7-a\n");
 #endif
@@ -1526,8 +1652,8 @@ tree_node* build_steiner_tree(destination_t* source, destination_t** target_list
 	   }
 	}
 	// A8 : IF d(s, t) < R && R + d(t, u) + d(t, v) > d(s, u) + d(s, v), then s adds u and v as children
-	else if(compute_distance(s, best->t) < RADIO_RANGE
-	    && RADIO_RANGE + compute_distance(best->t, best->u) + compute_distance(best->t, best->v) > compute_distance(s, best->u) + compute_distance(s, best->v))
+	else if(compute_node_distance(s, best->t) < RADIO_RANGE
+	    && RADIO_RANGE + compute_node_distance(best->t, best->u) + compute_node_distance(best->t, best->v) > compute_node_distance(s, best->u) + compute_node_distance(s, best->v))
         {
 #ifdef DGB_STEINER
 	    fprintf(stderr, "[STN] A8\n");
@@ -1703,7 +1829,7 @@ void remove_child(tree_node* parent, int child_index)
 // Calculate the sum of the distance this node and all its non-virtual descendants and some origin
 double distance_sum(tree_node* node, position_t origin)
 {
-    double d = (node->isVirtual ? 0 : distance(&node->location.position, &origin));
+    double d = (node->isVirtual ? 0 : compute_distance(node->location.position, origin));
 
     int i;
     for(i = 0; i < node->child_count; i++){
@@ -1764,11 +1890,11 @@ steiner_tuple* generate_steiner_tuple(tree_node* root, tree_node* left, tree_nod
 
     // compute reduction ratio for this tuple
 
-    double st = compute_distance(tuple->s, tuple->t);
-    double su = compute_distance(tuple->s, tuple->u);
-    double sv = compute_distance(tuple->s, tuple->v);
-    double tu = compute_distance(tuple->t, tuple->u);
-    double tv = compute_distance(tuple->t, tuple->v);
+    double st = compute_node_distance(tuple->s, tuple->t);
+    double su = compute_node_distance(tuple->s, tuple->u);
+    double sv = compute_node_distance(tuple->s, tuple->v);
+    double tu = compute_node_distance(tuple->t, tuple->u);
+    double tv = compute_node_distance(tuple->t, tuple->v);
 
 #ifdef DGB_STEINER
     fprintf(stderr, "[STN] calculating ratio ... \n");
@@ -1874,7 +2000,7 @@ double get_acute_angle_triple(position_t a, position_t b, position_t c)
 position_t get_equillateral_third(position_t a, position_t b, position_t c)
 {
     // distance from A to B
-    double dAB = distance(&a, &b);
+    double dAB = compute_distance(a, b);
 
     // Clockwise angle from A to B
     double AB = PI - get_angle_double(a, b);
@@ -1961,9 +2087,14 @@ tree_node* steiner_point(tree_node* a, tree_node* b, tree_node* c)
 }
 
 // Compute the distance between two steiner tree node locations
-double compute_distance(tree_node* a, tree_node* b){
-    double dx = a->location.position.x - b->location.position.x;
-    double dy = a->location.position.y - b->location.position.y;
+double compute_node_distance(tree_node* a, tree_node* b){
+    return compute_distance(a->location.position, b->location.position);
+}
+
+// Compute the distance between two locations
+double compute_distance(position_t a, position_t b){
+    double dx = a.x - b.x;
+    double dy = a.y - b.y;
 
     return sqrt(dx * dx + dy * dy);
 }
@@ -2047,8 +2178,8 @@ destination_t next_on_face(call_t *call, destination_t *start,
 	    //calculate angle between start-ref vector and start-next vector
 	    //using dot product
 	    position_t *temp_pos = &gg_nbr->position;
-	    d1 = distance(&start->position, &nodeRef->position);
-	    d2 = distance(&start->position, temp_pos);
+	    d1 = compute_distance(start->position, nodeRef->position);
+	    d2 = compute_distance(start->position, *temp_pos);
 	    angle = acos((double)(((start->position.x - nodeRef->position.x) *
 		(start->position.x - temp_pos->x) + (start->position.y -
 		nodeRef->position.y) * (start->position.y - temp_pos->y))
@@ -2189,7 +2320,7 @@ intersection_e check_intersect(call_t *call, destination_t *source,
 	//then the lines intersect 
 	dist = hypot((dest->position.x - x), (dest->position.y - y)) +
 	    hypot((source->position.x - x), (source->position.y - y));
-	if(((int)(distance(&source->position, &dest->position) * PRECISION)) ==
+	if(((int)(compute_distance(source->position, dest->position) * PRECISION)) ==
 	    (int)(dist * PRECISION))
 	{
 	    if(current_pos->x == x && current_pos->y == y)
@@ -2425,7 +2556,7 @@ void sf_spray_packets(call_t *call, packet_t *packet)
     return;
 }
 
-//forward greedily: closest neighbor to region center is next node. Returns false if
+//forward greedily: closest neighbor to destination is next node. Returns false if
 //closest is the current node (local minimum).
 bool greedy_forward(call_t *call, packet_t *packet)
 {
@@ -2445,16 +2576,16 @@ bool greedy_forward(call_t *call, packet_t *packet)
     das_init_traverse(node_data->gg_list);
 
     destination_t *minimum = &my_pos;
-    double neighbor_distance, min_distance = distance(&my_pos.position, &header->dest.position);
+    double neighbor_distance, min_distance = compute_distance(my_pos.position, header->dest.position);
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Region center is located at (%f,%f), and current node at (%f,%f); distance of %f.\n", header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
+    fprintf(stderr, "[RTG] Destination is located at (%f,%f), and current node at (%f,%f); distance of %f.\n", header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
 #endif
 
     for(i = 0; i < size; ++i)
     {
         gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
-        neighbor_distance = distance(&gg_nbr->position, &header->dest.position);
+        neighbor_distance = compute_distance(gg_nbr->position, header->dest.position);
 
         if(check_in_geocast(&header->dest, gg_nbr)) return false;
 
@@ -2469,6 +2600,9 @@ bool greedy_forward(call_t *call, packet_t *packet)
     }
 
     if(minimum != &my_pos){
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG]   Sending to %d!\n", minimum->id);
+#endif
         header->sender = my_pos;
         header->next_node = *minimum;
         header->direction = NO_DIR;

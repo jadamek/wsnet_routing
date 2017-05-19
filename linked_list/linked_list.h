@@ -39,8 +39,8 @@ list_node*      list_node_at(linked_list* list, int position);
 // - Item creation/addition
 void            list_push_back(linked_list* list, void* item);
 void            list_push_front(linked_list* list, void* item);
-void            list_add_left(linked_list* list, list_node* neighbor, void* item);
-void            list_add_right(linked_list* list, list_node* neighbor, void* item);
+void            list_add_after(linked_list* list, list_node* node, void* item);
+void            list_add_before(linked_list* list, list_node* node, void* item);
 
 // - Traversal (item-based and node-based)
 void            list_start_traversal(linked_list* list);

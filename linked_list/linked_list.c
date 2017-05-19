@@ -127,40 +127,40 @@ void list_push_front(linked_list* list, void* item){
 }
 
 //---------------------------------------------------------------------
-// * Add Item (Left Of)
+// * Add Item Before
 //---------------------------------------------------------------------
-// Adds a new item to the left of (before) a given node in the list
+// Adds a new item before a given node in the list
 //---------------------------------------------------------------------
-void list_add_left(linked_list* list, list_node* neighbor, void* item){
-    if(list == NULL || neighbor == NULL) return;
+void list_add_before(linked_list* list, list_node* node, void* item){
+    if(list == NULL || node == NULL) return;
 
     list_node* new_node = NEW(list_node);
     new_node->data = item;
-    new_node->next = neighbor;
-    new_node->prev = neighbor->prev;
-    if(neighbor->prev != NULL) neighbor->prev->next = new_node;
-    neighbor->prev = new_node;
+    new_node->next = node;
+    new_node->prev = node->prev;
+    if(node->prev != NULL) node->prev->next = new_node;
+    node->prev = new_node;
 
-    if(list->front == neighbor) list->front = new_node;
+    if(list->front == node) list->front = new_node;
     list->size++;
 }
 
 //---------------------------------------------------------------------
-// * Add Item (Right Of)
+// * Add Item After
 //---------------------------------------------------------------------
-// Adds a new item to the right of (after) a given node in the list
+// Adds a new item after a given node in the list
 //---------------------------------------------------------------------
-void list_add_right(linked_list* list, list_node* neighbor, void* item){
-    if(list == NULL || neighbor == NULL) return;
+void list_add_after(linked_list* list, list_node* node, void* item){
+    if(list == NULL || node == NULL) return;
 
     list_node* new_node = NEW(list_node);
     new_node->data = item;
-    new_node->next = neighbor->next;
-    new_node->prev = neighbor;
-    if(neighbor->next != NULL) neighbor->next->prev = new_node;
-    neighbor->next = new_node;
+    new_node->next = node->next;
+    new_node->prev = node;
+    if(node->next != NULL) node->next->prev = new_node;
+    node->next = new_node;
 
-    if(list->back == neighbor) list->back = new_node;
+    if(list->back == node) list->back = new_node;
     list->size++;
 }
 
