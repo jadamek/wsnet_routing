@@ -5,6 +5,7 @@
 // 4/30/2017
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <include/modelutils.h>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -41,8 +42,6 @@ model_t model =
 ////////////////////////////////////////////////////////////////////////////////
 // Structs and Typedefs
 
-typedef int bool;
-
 typedef struct
 {
 	int overhead;
@@ -69,7 +68,7 @@ int destroy(call_t *call);
 int call_back(call_t *call, void *args);
 int tx_start(call_t *call, void *args);
 
-int compare_destinations(destination_t *l, destination_t *r);
+bool compare_destinations(destination_t *l, destination_t *r);
 
 ////////////////////////////////////////////////////////////////////////////////
 // Init
@@ -152,7 +151,7 @@ int setnode(call_t *call, void *params)
     /*param_t *param*/
 
     node_data->packet_size = DEFAULT_PACKET_SIZE;
-    node_data->received_packet = FALSE;
+    node_data->received_packet = false;
 
     /*
     //get params
@@ -251,6 +250,7 @@ void rx(call_t *call, packet_t *packet)
     entity_data_t *entity_data = get_entity_private_data(call);
     node_data_t *node_data = get_node_private_data(call);
 
+
     if(!node_data->received_packet)
     {
 	entity_data->latency = get_time() - TX_START_TIME;
@@ -270,8 +270,8 @@ bool compare_destinations(destination_t *l, destination_t *r)
 	l->position.x != r->position.x ||
 	l->position.y != r->position.y ||
 	r->position.z != r->position.z)
-	return FALSE;
-    return TRUE;
+	return false;
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

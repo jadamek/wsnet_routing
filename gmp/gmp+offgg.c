@@ -13,7 +13,7 @@
 
 #include <include/modelutils.h>
 
-#define LOG_ROUTING
+//#define LOG_ROUTING
 //#define DBG_STEINER
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
@@ -46,7 +46,7 @@ model_t model =
 #define DEFAULT_START_TIME 0
 //period between executions of planarization algorithm in nanoseconds
 #define PERIOD 1000000000
-#define DEFAULT_TTL 55
+#define DEFAULT_TTL 500
 
 //how many decimal places are used in calculations
 #define PRECISION 100000
@@ -132,7 +132,6 @@ typedef struct
     destination_t src;
     destination_t sender;
     destination_t next_node;
-    destination_t check_point;
     packet_e type;
     mode_e mode;
     direction_e direction;
@@ -144,6 +143,8 @@ typedef struct
     destination_t** destination_list;
     tree_node* root;
     bool face_mode;
+    destination_t gmp_check_point;
+    destination_t gfg_check_point;
 }header_t;
 
 //Global node data, used for tracking information known to node
@@ -499,7 +500,6 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->dest = *dest;
     header->sender = no_dest;
     header->next_node = no_dest;
-    header->check_point = my_pos;
     header->type = DATA_PACKET;
     header->mode = GREEDY;
     header->direction = NO_DIR;
@@ -510,6 +510,8 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->target_list = malloc(sizeof(destination_t*) * header->target_count);
     header->destination_list = malloc(sizeof(destination_t*) * header->destination_count);
     header->face_mode = false;
+    header->gmp_check_point = my_pos;
+    header->gfg_check_point = my_pos;
 
     // Generate target list
     int i = 0, di = 0;
@@ -1076,9 +1078,15 @@ void tx(call_t *call, packet_t *packet)
     }
 
     if(header->target_count == 1){
+	// If there is only a single target left, will be GFG routed directly to that target
+	if(!compare_destinations(&header->dest, header->target_list[0])){
+	    header->dest = *header->target_list[0];
+	}
+
 #ifdef LOG_ROUTING
-        fprintf(stderr, "[RTG] GFG routing single target %d at %d\n", header->target_list[0]->id, call->node);
+        fprintf(stderr, "[RTG] GFG routing single target %d at %d, headed for %d\n", header->target_list[0]->id, call->node, header->dest.id);
 #endif
+
 	gfg_forward(call, packet);
     }
     else{
@@ -1294,16 +1302,31 @@ void forward(call_t *call, packet_t *packet)
 	    }
 
 	    list_start_traversal(requests);
-	    int first_target = ((spawn_request*)list_traverse(requests))->target->id;
+	    destination_t* first_target = ((spawn_request*)list_traverse(requests))->target;
+
+	    double check_point = compute_distance(header->gmp_check_point.position, header->dest.position);
+	    double attempted_progress = compute_distance(first_target->position, header->dest.position);
+
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "[RTG] %d/%d targets attempting greedy routing.\n", requested_targets, header->target_count);
+	    fprintf(stderr, "[RTG] First target (%d|%f) attempting progress from previous check point (%d|%f)\n",
+		first_target->id, attempted_progress,
+		header->gmp_check_point.id, check_point);
+#endif
 
 	    // If collective greedy decisions are making any progress, or not all pivots are travelling in the
 	    // same direction, fulfill the requests. Otherwise, it is a continued face routing.
 
-	    if (first_target == header->sender.id && requested_targets == header->target_count){
+	    bool all_one = requested_targets == header->target_count;
+	    bool progress = attempted_progress < check_point;
+
+	    fprintf(stderr, "[RTG] progress:%d, all_one:%d\n", progress, all_one);
+	    if(all_one && !progress){
+
 		release = false;
 
 		while((request = (spawn_request*)list_traverse(requests)) != NULL){
-		    if(request->target->id != first_target){
+		    if(request->target->id != first_target->id){
 			release = true;
 			break;
 		    }
@@ -1346,9 +1369,6 @@ void forward(call_t *call, packet_t *packet)
 	    spawn_header->target_list = vp;
 	    spawn_header->target_count = vp_count;
 	    spawn_header->root = build_steiner_tree(request->target, vp, vp_count);
-
-	    // If there is only a single target left, will be GFG routed directly to that target
-	    if(vp_count == 1) header->dest = *(vp[0]);
 
 	    if(set_mac_header_tx(call, spawn_packet) == ERROR)
 		fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
@@ -1411,6 +1431,7 @@ void forward(call_t *call, packet_t *packet)
 	    header->target_list = vp;
 	    header->target_count = vp_count;
 	    header->root = build_steiner_tree(&header->next_node, vp, vp_count);
+	    header->gmp_check_point = my_pos;
 
 	    if(set_mac_header_tx(call, packet) == ERROR)
 		fprintf(stderr, "[ERR] Can't route GMP-Face spawn.\n");
@@ -1446,11 +1467,18 @@ void gfg_forward(call_t *call, packet_t *packet){
     // If successfully reached target, STOP
     if(compare_destinations(&my_pos, &header->dest)) return;
 
+    double check_point = compute_distance(header->gfg_check_point.position, header->dest.position);
+    double current_progress = compute_distance(my_pos.position, header->dest.position);
+    bool progress = current_progress < check_point;
+
     // If in Greedy mode, or if progress toward destination was made since the last switch to Face mode, route greedily
-    if(header->mode == GREEDY || (compute_distance(my_pos.position, header->dest.position) < compute_distance(my_pos.position, header->check_point.position))){
+    if(header->mode == GREEDY || progress){
+
         if(header->mode == FACE){
 #ifdef LOG_ROUTING
-            fprintf(stderr, "[RTG] Made progress toward destination with face routing. Switching back to greedy mode.\n");
+            fprintf(stderr, "[RTG] Made progress (%d|%f) toward destination with face routing (previously %d|%f). Switching back to greedy mode.\n",
+		my_pos.id, current_progress,
+		header->gfg_check_point.id, check_point);
 #endif
             header->mode = GREEDY;
         }
@@ -1461,7 +1489,6 @@ void gfg_forward(call_t *call, packet_t *packet){
         }
         // Failed greedy forwarding; switch to FACE mode
         else{
-            header->check_point = my_pos;
             header->mode = FACE;
 
             // Choose best direction to start face routing in
@@ -1481,6 +1508,8 @@ void gfg_forward(call_t *call, packet_t *packet){
 #endif
 
             header->sender = my_pos;
+	    header->gfg_check_point = my_pos;
+
             if(set_mac_header_tx(call, packet) == ERROR)
                 fprintf(stderr, "[ERR] Can't route packet\n");
 
@@ -2590,7 +2619,7 @@ bool greedy_forward(call_t *call, packet_t *packet)
         if(check_in_geocast(&header->dest, gg_nbr)) return false;
 
 #ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the region center.\n", gg_nbr->id, neighbor_distance);
+	fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the target <%d (%f, %f)>.\n", gg_nbr->id, neighbor_distance, header->dest.id, header->dest.position.x, header->dest.position.y);
 #endif
 
         if(neighbor_distance < min_distance){
@@ -2626,7 +2655,7 @@ void face_forward(call_t *call, packet_t *packet){
     fprintf(stderr, "[RTG] %s face traversing from %d torward %d.\n", (header->direction == TRAVERSE_L ? "leftward" : "rightward"), my_pos.id, header->next_node.id);
 #endif
 
-    intersection_e result = check_intersect(call, &header->check_point, &header->dest, &header->next_node);
+    intersection_e result = check_intersect(call, &header->gfg_check_point, &header->dest, &header->next_node);
 
     // If next node is a juncture, switch traversal directions
     if(result == INTERSECTION){
