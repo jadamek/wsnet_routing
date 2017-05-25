@@ -23,10 +23,10 @@ model_t model =
 // Defines
 
 #define TRUE 1
-#define FALSE 2
+#define FALSE 0
 
 #define DEFAULT_PACKET_SIZE 10
-#define TX_START_TIME 2000000000
+#define TX_START_TIME 5000000000ull
 #define DEFAULT_START_TIME 0
 
 #define ERROR -1
@@ -227,7 +227,8 @@ int call_back(call_t *call, void *args)
     }
 
     entity_data->num_tx++;
-    scheduler_add_callback(TX_START_TIME, call, tx_start, (void*)packet);
+    scheduler_add_callback(entity_data->num_targets * TX_START_TIME, call,
+	tx_start, (void*)packet);
     return 0;
 }
 
@@ -253,7 +254,8 @@ void rx(call_t *call, packet_t *packet)
 
     if(!node_data->received_packet)
     {
-	entity_data->latency = get_time() - TX_START_TIME;
+	entity_data->latency = get_time() - entity_data->num_targets *
+	    TX_START_TIME;
 	node_data->received_packet = TRUE;
 	entity_data->num_rx++;
     }
