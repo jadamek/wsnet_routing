@@ -1,5 +1,5 @@
 // spg.c
-// Geographic Multicasting Protocol (GMP) Module with Static tree & Dijkstra
+// Location-Guided Steiner tree (LGS) Module with Dijkstra
 // plus error rate and offline planarization
 // Jordan Adamek
 // 12/11/2016
@@ -20,7 +20,7 @@
 
 model_t model = 
 {
-    "GMP with Static tree, BFS, CDS, and error rate",
+    "LGS with BFS, CDS, and error rate",
     "Jordan Adamek",
     "0.1",
     MODELTYPE_ROUTING,
@@ -108,6 +108,21 @@ typedef struct tnode
     bool isActive;
 } tree_node;
 
+// Mininum Spanning tree construction types
+typedef struct
+{
+    destination_t this;
+    destination_t parent;
+    void *children;
+}tree_node_t;
+
+typedef struct
+{
+    destination_t *parent;
+    destination_t *to_add;
+    double distance;
+}winner_t;
+
 //Tuple (root, steiner, left, right) for tree construction
 typedef struct
 {
@@ -141,9 +156,7 @@ typedef struct
     destination_t** target_list;
     int destination_count;
     destination_t** destination_list;
-    tree_node* root;
-    bool face_mode;
-    destination_t gmp_check_point;
+    tree_node_t* root;
     destination_t gfg_check_point;
 }header_t;
 
@@ -200,6 +213,14 @@ int start_dijk(call_t *call, destination_t *dest, destination_t** target_list, i
 void* get_shortest_path(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
+
+// Minimum spanning tree construction functions
+tree_node_t* get_mst(call_t*, void*);
+winner_t get_shortest_dist(tree_node_t*, destination_t*);
+tree_node_t* get_branch(tree_node_t*, destination_t*);
+void print_mst(tree_node_t* node, int tab);
+bool check_node_in(void*, nodeid_t);
+void delete_tree(tree_node_t*);
 
 // steiner tree construction functions
 tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count);
@@ -510,13 +531,12 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->destination_count = dest->id;
     header->target_list = malloc(sizeof(destination_t*) * header->target_count);
     header->destination_list = malloc(sizeof(destination_t*) * header->destination_count);
-    header->face_mode = false;
-    header->gmp_check_point = my_pos;
     header->gfg_check_point = my_pos;
 
     // Generate target list
     int i = 0, di = 0;
     destination_t* tmp = 0;
+    void* dests = das_create();
 
     for(i = 0; i < header->target_count; i++){
         if(i == my_pos.id){
@@ -529,9 +549,10 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
 	tmp->position = *get_node_position(i + di);
 	header->target_list[i] = tmp;
 	header->destination_list[i] = tmp;
+        das_insert(dests, (void*)tmp);
     }
 
-    header->root = build_steiner_tree(&header->src, header->target_list, header->target_count);
+    header->root = get_mst(call, dests);
 
     //do_cds(call, dest);
     if(start_dijk(call, dest, header->target_list, header->target_count) == ERROR)
@@ -1101,49 +1122,33 @@ void forward(call_t *call, packet_t *packet)
 
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] steiner tree:\n");
-    print_tree(header->root, 2);
+    print_mst(header->root, 2);
+#endif
+    tree_node_t* child;
+
+    // If the sub-destinations was reached, split the message per-child
+    if(compare_destinations(&my_pos, &header->root->this)){
+#ifdef LOG_ROUTING
+    	fprintf(stderr, "[RTG] Splitting message toward %d children:\n", das_getsize(header->root->children));
 #endif
 
-    bool juncture = false;
-    int i;
-
-    // If the destination is virtual, cannot directly cross it. Determine if it has been "crossed"
-    if(header->root->isVirtual){
-
+	das_init_traverse(header->root->children);
+	while((child = (tree_node_t*)das_traverse(header->root->children)) != NULL){
 #ifdef LOG_ROUTING
-        fprintf(stderr, "[RTG] Checking if last transmission bypassed an edge to an immediate child ...\n");
-#endif
-        for(i = 0; i < header->root->child_count; i++){
-	    bool bypassed = edges_bypass(header->sender.position, my_pos.position, header->root->location.position, header->root->children[i]->location.position);
-	    if(bypassed || compare_destinations(&my_pos, &header->root->location)){
-	        juncture = true;
-	        break;
-	    }
-        }
-    }
-
-    // If this is a juncture, or if the sub-destinations was reached, split the message per-child
-    if(compare_destinations(&my_pos, &header->root->location) || juncture){
-#ifdef LOG_ROUTING
-    	fprintf(stderr, "[RTG] Splitting message toward %d children:\n", header->root->child_count);
-#endif
-	for(i = 0; i < header->root->child_count; i++){	    
-
-#ifdef LOG_ROUTING
-	    fprintf(stderr, "         %d\n", header->root->children[i]->location.id);
+	    fprintf(stderr, "         %d\n", child->this.id);
 #endif
 
 	    packet_t* child_packet = copy_packet(call, packet, header, INCREMENT);
 	    header_t* child_header = PACKET_HEADER(child_packet, node_data);
-	    child_header->root = header->root->children[i];
-	    child_header->dest = child_header->root->location;
+	    child_header->root = child;
+	    child_header->dest = child->this;
 
 	    gfg_forward(call, child_packet);	    		
 	}
     }
     else{
 #ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG] GFG forwarding toward destination %d.\n", header->root->location.id);
+	fprintf(stderr, "[RTG] GFG forwarding toward destination %d.\n", header->root->this.id);
 #endif
 	gfg_forward(call, packet);
     }
@@ -1238,7 +1243,141 @@ bool edges_bypass(position_t a1, position_t a2, position_t b1, position_t b2){
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// TREE FUNCTIONS
+// MINIMUM SPANNING TREE FUNCTIONS
+
+// Build spanning tree from a list of destinations
+tree_node_t* get_mst(call_t *call, void* dests)
+{
+    destination_t my_pos = THIS_DESTINATION(call), none = NO_DESTINATION;       
+    void *added = das_create();
+
+    //init tree root to source node 
+    tree_node_t *root = NEW(tree_node_t);
+    root->this = my_pos;              
+    root->parent = none;
+    root->children = das_create();
+
+    //find next closest not already added target and add to tree
+    while(das_getsize(added) < das_getsize(dests))
+    {
+        winner_t tmp, shortest;         
+        shortest.distance = 0;                 
+        destination_t *to_add = NULL;
+
+        das_init_traverse(dests);
+        while((to_add = (destination_t*)das_traverse(dests)) != NULL)
+        {
+            if(!check_node_in(added, to_add->id))
+            {
+                tmp = get_shortest_dist(root, to_add);
+                if(shortest.distance == 0 || tmp.distance < shortest.distance)
+                    shortest = tmp;
+            }  
+        }
+        tree_node_t *branch;
+        if((branch = get_branch(root, shortest.parent)) == NULL)
+        {
+            fprintf(stderr, "[ERR] Parent not found in tree\n");
+            delete_tree(root);
+            return NULL;
+        }
+        tree_node_t *new_child = NEW(tree_node_t);
+        new_child->this = *shortest.to_add;
+        new_child->parent = branch->this;
+        new_child->children = das_create();
+        das_insert(branch->children, (void*)new_child);
+        new_child = NULL;
+        das_insert(added, (void*)shortest.to_add);
+    }
+    return root;
+}
+
+// Get shortest new edge
+winner_t get_shortest_dist(tree_node_t *root, destination_t *to_add)
+{
+    winner_t to_return, tmp;
+    to_return.parent = &root->this;
+    to_return.to_add = to_add;
+    to_return.distance = distance(&root->this.position, &to_add->position);
+
+    if(das_getsize(root->children) != 0)
+    {
+        tree_node_t *child = NULL;
+        das_init_traverse(root->children);
+        while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+        {
+            tmp = get_shortest_dist(child, to_add);
+            if(tmp.distance < to_return.distance)
+                to_return = tmp;
+        }
+    }
+    return to_return;
+}
+
+// Recursively searches a tree for the node that represents a given destination
+tree_node_t* get_branch(tree_node_t *root, destination_t *to_get)
+{
+    if(compare_destinations(&root->this, to_get))
+        return root;
+    tree_node_t *child = NULL, *tmp = NULL;
+    das_init_traverse(root->children);
+    while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+    {
+        tmp = get_branch(child, to_get);
+        if(tmp != NULL && compare_destinations(&tmp->this, to_get))
+            return tmp;
+    }
+    return NULL;
+}
+
+// Print spanning tree
+void print_mst(tree_node_t* node, int tab)
+{
+    int t;
+
+    for(t = 0; t < tab * 3; t++) fprintf(stderr, " ");
+
+    fprintf(stderr, "<id: %d (%f, %f)>\n",
+	node->this.id, node->this.position.x, node->this.position.y);
+
+    tree_node_t* child;
+
+    das_init_traverse(node->children);
+    while((child = (tree_node_t*)das_traverse(node->children)) != NULL){
+	print_mst(child, tab + 1);
+    }
+}
+
+// Check if node exists in child list
+bool check_node_in(void* das, nodeid_t to_check)
+{
+    destination_t *entry = NULL;
+    das_init_traverse(das);
+    while((entry = (destination_t*)das_traverse(das)) != NULL)
+    {
+        if(entry->id == to_check)
+            return true;               
+    }                    
+    return false;      
+}
+
+// Delete spanning tree
+void delete_tree(tree_node_t *root)
+{
+    if(das_getsize(root->children) != 0)
+    {
+        tree_node_t *child = NULL;
+
+        das_init_traverse(root->children);
+        while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+            delete_tree(child);
+    }
+    free(root);
+    return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// STEINER TREE FUNCTIONS
 
 // Build a Steiner tree out of a given list of real targets
 tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count)
