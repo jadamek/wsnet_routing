@@ -305,10 +305,15 @@
 </entity>
 -->
 
+<!--
 <entity name="routing" library="routing_gmp_offgg">
   <init loss_rate="0" />
 </entity>
+-->
 
+<entity name="routing" library="routing_gmp_static">
+  <init loss_rate="0" />
+</entity>
 
 <!--
 <entity name="routing" library="routing_dijkstra">
