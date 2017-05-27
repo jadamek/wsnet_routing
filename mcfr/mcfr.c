@@ -88,6 +88,7 @@ typedef struct
 typedef struct
 {
     nodeid_t target;
+    int num_hops;
     uint64_t start;
     uint64_t latency;
     void *path;
@@ -121,6 +122,8 @@ typedef struct
     int deliver_num_hops;
     int num_packets;
     uint64_t dijk_latency;
+    uint64_t punishment_latency;
+    void *delivered_to;
     nodeid_t last_reached;
     void *paths;
 
@@ -209,6 +212,11 @@ int init(call_t *call, void *params)
         fprintf(stderr, "[ERR] Can't allocate entity data in routing module\n");
         return ERROR;
     }
+    if((entity_data->delivered_to = das_create()) == NULL)
+    {
+	fprintf(stderr, "[ERR] Can't allocate entity_data delivered_to\n");
+	return ERROR;
+    }
     if((entity_data->paths = das_create()) == NULL)
     {
         fprintf(stderr, "[ERR] Can't alocate entity_data paths\n");
@@ -220,6 +228,7 @@ int init(call_t *call, void *params)
     entity_data->num_packets = 0;
     entity_data->num_reachable = 0;
     entity_data->dijk_latency = 0;
+    entity_data->punishment_latency = 0;
     entity_data->last_reached = NONE;
     entity_data->steiner = NULL;
 
@@ -262,18 +271,36 @@ int destroy(call_t *call)
     char* name= (char*)malloc(11 * sizeof(int));
     sprintf(name, "results.txt");
 
-    if(entity_data->last_reached != NONE)
+
+    if(das_getsize(entity_data->delivered_to) < entity_data->num_reachable)
     {
+	bool punished_lat = false;
         path_t *to_check = NULL;
         das_init_traverse(entity_data->paths);
         while((to_check = (path_t*)das_traverse(entity_data->paths)) != NULL)
         {
+	    if(!punished_lat && to_check->latency != 0)
+	    {
+		entity_data->punishment_latency = to_check->latency;
+		punished_lat = true;
+	    }
             if(to_check->target == entity_data->last_reached)
-            {
                 entity_data->dijk_latency = to_check->latency;
-                break;
-            }
+	    if(!check_node_in(entity_data->delivered_to, to_check->target))
+		entity_data->num_packets += to_check->num_hops;
         }
+    }
+    else if(entity_data->last_reached != NONE)
+    {
+	path_t *to_check = NULL;
+	das_init_traverse(entity_data->paths);
+	while((to_check = (path_t*)das_traverse(entity_data->paths)) != NULL)
+	{
+	    if(to_check->target == entity_data->last_reached)
+	    {
+		entity_data->dijk_latency = to_check->latency;
+	    }
+	}
     }
 
     fprintf(stderr, "Routing Statistics:\n");
@@ -284,14 +311,35 @@ int destroy(call_t *call)
         entity_data->total_num_hops);
     fprintf(stderr, "  BFS latency: %lld nanoseconds\n",
         entity_data->dijk_latency);
+    fprintf(stderr, "  Punishment Latency: %lld nanoseconds\n",
+	entity_data->punishment_latency);
     fprintf(stderr, "  Num reachable targets: %d\n",
         entity_data->num_reachable);
 
     if((results = fopen(name, "a")) == NULL)
         fprintf(stderr, "[ERR] Couldn't open file %s\n", name);
     else
-        fprintf(results, "%lld\t%d\t%d\n", entity_data->dijk_latency,
-            entity_data->num_reachable, entity_data->num_packets);
+        fprintf(results, "%lld\t%lld\t%d\t%d\n", entity_data->dijk_latency,
+            entity_data->punishment_latency, entity_data->num_reachable,
+	    entity_data->num_packets);
+
+
+    destination_t *to_delete = NULL;
+    das_init_traverse(entity_data->delivered_to);
+    while((to_delete = (destination_t*)das_traverse(entity_data->delivered_to))
+	!= NULL)
+	free(to_delete);
+    das_destroy(entity_data->delivered_to);
+    to_delete = NULL;
+    path_t *to_destroy = NULL;
+    das_init_traverse(entity_data->paths);
+    while((to_destroy = (path_t*)das_traverse(entity_data->paths)) != NULL)
+    {
+	das_destroy(to_destroy->path);
+	free(to_destroy);
+    }
+    das_destroy(entity_data->paths);
+    to_destroy = NULL;
 
     free(entity_data);
     entity_data = NULL;
@@ -389,7 +437,6 @@ int bootstrap(call_t *call)
 
 int set_header(call_t *call, packet_t *packet, destination_t *dest)
 {
-fprintf(stderr, "[DBG] printing call->node: %d\n", call->node);
     entity_data_t *entity_data = ENTITY_DATA(call);
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
@@ -405,20 +452,17 @@ fprintf(stderr, "[DBG] printing call->node: %d\n", call->node);
     header->path = NULL;
     header->dests = das_create();
     get_dests(call, header->dests, dest->id);
-fprintf(stderr, "check1\n");
     if(das_getsize(header->dests) == 0)
     {
         fprintf(stderr, "[ERR] Error getting targets\n");
         return ERROR;
     }
-fprintf(stderr, "check2\n");
     if((entity_data->steiner = build_steiner_tree(&header->source,
         header->dests)) == NULL)
     {
         fprintf(stderr, "[ERR] Error calculating steiner tree\n");
         return ERROR;
     }
-fprintf(stderr, "check3\n");
     header->steiner = entity_data->steiner;
     if(start_dijk(call, header->dests) == ERROR)
         fprintf(stderr, "[ERR] unable to start shortest path\n");
@@ -428,7 +472,6 @@ fprintf(stderr, "check3\n");
     steiner_post_axes(call);
 #endif
     entity_data->num_packets++;
-fprintf(stderr, "check4\n");
     return SET_HEADER(&call_down, packet, dest);
 }
 
@@ -1070,6 +1113,7 @@ void* get_shortest_path(call_t *call, void* dests)
                         new_path->target = last_found->this;
                         new_path->latency = 0;
                         new_path->path = make_path(call, visited, last_found);
+			new_path->num_hops = das_getsize(new_path->path);
                         das_insert(paths, (void*)new_path);
                         new_path = NULL;
                         entity_data->num_reachable++;
@@ -1126,10 +1170,6 @@ void* make_path(call_t *call, void *visited, visited_node_t *end)
 	    next = NULL;
         }
     }
-das_init_traverse(path);
-while((next = (nodeid_t*)das_traverse(path)) != NULL)
-fprintf(stderr, "%d, ", *next);
-fprintf(stderr, "\n");
     return path;
 }
 
@@ -1757,6 +1797,11 @@ void rx(call_t *call, packet_t *packet)
 #endif
     if(!node_data->received_packet)
     {
+	destination_t *new_reached = NEW(destination_t);
+	new_reached->id = call->node;
+	new_reached->position = *get_node_position(call->node);
+	das_insert(entity_data->delivered_to, (void*)new_reached);
+	new_reached = NULL;
 	entity_data->last_reached = call->node;
         entity_data->deliver_num_hops = entity_data->total_num_hops;
         node_data->received_packet = true;
