@@ -1,5 +1,5 @@
 // spg.c
-// Geographic Multicasting Protocol (GMP) Module with Dijkstra
+// Location-Guided Steiner tree (LGS) Module with Dijkstra
 // plus error rate and offline planarization
 // Jordan Adamek
 // 12/11/2016
@@ -13,14 +13,14 @@
 
 #include <include/modelutils.h>
 
-//#define LOG_ROUTING
+#define LOG_ROUTING
 //#define DBG_STEINER
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
 
 model_t model = 
 {
-    "GMP with BFS, CDS, and error rate",
+    "LGS with BFS, CDS, and error rate",
     "Jordan Adamek",
     "0.1",
     MODELTYPE_ROUTING,
@@ -98,12 +98,12 @@ typedef struct
     nodeid_t prev;
 }visited_node_t;
 
-typedef struct     
+typedef struct
 {
     nodeid_t target;
     uint64_t start;
     uint64_t latency;
-    void *path;    
+    void *path;
 }path_t;
 
 //Routing tree of multicast targets
@@ -115,6 +115,21 @@ typedef struct tnode
     bool isVirtual;
     bool isActive;
 } tree_node;
+
+// Mininum Spanning tree construction types
+typedef struct
+{
+    destination_t this;
+    destination_t parent;
+    void *children;
+}tree_node_t;
+
+typedef struct
+{
+    destination_t *parent;
+    destination_t *to_add;
+    double distance;
+}winner_t;
 
 //Tuple (root, steiner, left, right) for tree construction
 typedef struct
@@ -149,9 +164,7 @@ typedef struct
     destination_t** target_list;
     int destination_count;
     destination_t** destination_list;
-    tree_node* root;
-    bool face_mode;
-    destination_t gmp_check_point;
+    tree_node_t* root;
     destination_t gfg_check_point;
 }header_t;
 
@@ -205,13 +218,21 @@ bool no_outside_nbr(void *nbr_list, destination_t *dest);
 void add_outside_nbr(call_t *call, void *list, destination_t *dest);
 void planarize_graph(call_t *call);
 int hello_callback(call_t *call, void *args);
-int start_dijk(call_t *call, destination_t *dest, destination_t** target_list, int target_count, tree_node* root);
-int dijk_start(call_t* call, void* dests);
-void* get_shortest_path(call_t *call, void *dests);
-void* make_path(call_t *call, void* dests, visited_node_t*);
+int start_dijk(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
+int dijk_start(call_t*, void*);  
+void* get_shortest_path(call_t*, void*);
+void* make_path(call_t*, void*, visited_node_t*);
+bool check_node_in(void*, nodeid_t);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
+
+// Minimum spanning tree construction functions
+tree_node_t* get_mst(call_t*, void*);
+winner_t get_shortest_dist(tree_node_t*, destination_t*);
+tree_node_t* get_branch(tree_node_t*, destination_t*);
+void print_mst(tree_node_t* node, int tab);
 bool check_node_in(void*, nodeid_t);
+void delete_tree(tree_node_t*);
 
 // steiner tree construction functions
 tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count);
@@ -241,6 +262,7 @@ double compute_distance(position_t a, position_t b);
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
 bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check);
+bool edges_bypass(position_t a1, position_t a2, position_t b1, position_t b2);
 
 //routing functions - cfr/flood
 destination_t next_on_face(call_t *call, destination_t *start,
@@ -303,8 +325,14 @@ int init(call_t *call, void* params)
     entity_data->total_num_hops = 0;
     entity_data->num_packets = 1;
     entity_data->num_reachable = 0;
-    entity_data->dijk_latency = 0;
     entity_data->last_reached = NONE;
+    entity_data->dijk_latency = 0;
+
+    if((entity_data->paths = das_create()) == NULL)
+    {
+        fprintf(stderr, "[ERR] Can't alocate entity_data paths\n");
+        return ERROR;
+    }
 
 #if defined LOG_TOPO_G || defined LOG_GG
     position_t *topo_pos = get_topology_area();
@@ -356,7 +384,6 @@ int destroy(call_t *call)
             }
         }
     }
-
 
     fprintf(stderr, "Routing Statistics:\n");
     fprintf(stderr, "  number of packets: %d\n", entity_data->num_packets);
@@ -527,13 +554,12 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->destination_count = dest->id;
     header->target_list = malloc(sizeof(destination_t*) * header->target_count);
     header->destination_list = malloc(sizeof(destination_t*) * header->destination_count);
-    header->face_mode = false;
-    header->gmp_check_point = my_pos;
     header->gfg_check_point = my_pos;
 
     // Generate target list
     int i = 0, di = 0;
     destination_t* tmp = 0;
+    void* dests = das_create();
 
     for(i = 0; i < header->target_count; i++){
         if(i == my_pos.id){
@@ -546,13 +572,29 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
 	tmp->position = *get_node_position(i + di);
 	header->target_list[i] = tmp;
 	header->destination_list[i] = tmp;
+        das_insert(dests, (void*)tmp);
     }
 
-    header->root = build_steiner_tree(&header->src, header->target_list, header->target_count);
-	
+    header->root = get_mst(call, dests);
+
     //do_cds(call, dest);
-    if(start_dijk(call, dest, header->target_list, header->target_count, header->root) == ERROR)
+    if(start_dijk(call, dest, header->target_list, header->target_count) == ERROR)
 	fprintf(stderr, "[ERR] unable to start shortest path\n");
+
+    if(compare_destinations(&header->dest, &no_dest))
+    {
+	fprintf(stderr, "[ERR] Invalid destination\n");
+	packet_dealloc(packet);
+	packet = NULL;
+	return ERROR;
+    }
+    else if(compare_destinations(&header->src, &no_dest))
+    {
+	fprintf(stderr, "[ERR] Invalid source\n");
+	packet_dealloc(packet);
+	packet = NULL;
+	return ERROR;
+    }
 
     //also call set_header in mac layer to initialize mac header for the
     //packet as well
@@ -877,7 +919,7 @@ bool node_present_in(void *das, destination_t *identify)
 ////////////////////////////////////////////////////////////////////////////////
 // Dijkstra Functions
 
-int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, int target_count, tree_node* root)
+int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, int target_count)
 {
     entity_data_t *entity_data = ENTITY_DATA(call);
     entity_data->dijk_latency = get_time();
@@ -904,7 +946,6 @@ int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, i
     header->ttl = 0;
     header->target_list = target_list;
     header->target_count = target_count;
-    header->root = root;
 
     void* dests = das_create();
     for(i = 0; i < target_count; i++){
@@ -913,8 +954,8 @@ int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, i
 
     if((entity_data->paths = get_shortest_path(call, dests)) == NULL)
     {
-        fprintf(stderr, "[ERR] No shortest path found\n");
-        return ERROR; 
+	fprintf(stderr, "[ERR] No shortest path found\n");
+	return ERROR;
     }
 
     path_t *to_start = NULL;
@@ -1002,7 +1043,7 @@ void* get_shortest_path(call_t *call, void* dests)
                     {
                         *last_found = *new;
                         new_path = NEW(path_t);
-                        new_path->target = last_found->this;
+			new_path->target = last_found->this;
                         new_path->latency = 0;
 			new_path->path = make_path(call, visited, last_found);
                         das_insert(paths, (void*)new_path);
@@ -1068,7 +1109,6 @@ fprintf(stderr, "\n");
     return path;
 }
 
-
 bool check_in_visited(void* visited, destination_t *to_check)
 {
     visited_node_t *tmp = NULL;
@@ -1092,19 +1132,6 @@ visited_node_t* get_node(void *visited, nodeid_t to_get)
     }
     return NULL;
 }
-
-bool check_node_in(void* das, nodeid_t to_check)
-{
-    destination_t *entry = NULL;    
-    das_init_traverse(das);           
-    while((entry = (destination_t*)das_traverse(das)) != NULL)
-    {
-        if(entry->id == to_check)                
-            return true;
-    }
-    return false;             
-}
-
 
 ////////////////////////////////////////////////////////////////////////////////
 // tx
@@ -1145,25 +1172,11 @@ void tx(call_t *call, packet_t *packet)
         return;
     }
 
-
-    if(header->target_count == 1){
-	// If there is only a single target left, will be GFG routed directly to that target
-	if(!compare_destinations(&header->dest, header->target_list[0])){
-	    header->dest = *header->target_list[0];
-	}
-
 #ifdef LOG_ROUTING
-        fprintf(stderr, "[RTG] GFG routing single target %d at %d, headed for %d\n", header->target_list[0]->id, call->node, header->dest.id);
+    fprintf(stderr, "[RTG] LGS routing to %d at %d\n", header->dest.id, call->node);
 #endif
 
-	gfg_forward(call, packet);
-    }
-    else{
-#ifdef LOG_ROUTING
-        fprintf(stderr, "[RTG] GMP routing packet at %d\n", call->node);
-#endif
-        forward(call, packet);
-    }
+    forward(call, packet);
 
 //getchar();
     return;
@@ -1178,351 +1191,41 @@ void forward(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
-    linked_list* requests = create_linked_list();
-    spawn_request* request;
-    int i, c, pivot_index = 0;
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] target list(%d):\n", header->target_count);
-    for(i = 0; i < header->target_count; i++){
-	fprintf(stderr, "[RTG]   %d <%f, %f>\n", header->target_list[i]->id, header->target_list[i]->position.x, header->target_list[i]->position.y);
-    }	    
-
     fprintf(stderr, "[RTG] steiner tree:\n");
-    print_tree(header->root, 2);
-    // fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id, (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
+    print_mst(header->root, 2);
 #endif
+    tree_node_t* child;
 
-    if(header->root->child_count == 0){
-        return;
-    }
-
-    // Generate pivot list (all children of root in tree)
-    linked_list* pivots = create_linked_list();
-    tree_node* pivot = NULL;
-
-    for(i = 0; i < header->root->child_count; i++){
-	list_push_back(pivots, (void*)header->root->children[i]);
-    }
-
+    // If the sub-destinations was reached, split the message per-child
+    if(compare_destinations(&my_pos, &header->root->this)){
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Begin routing on pivot list:\n");
-    list_start_traversal(pivots);
-    while((pivot = (tree_node*)list_traverse(pivots)) != NULL){
-        fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
-    }
+    	fprintf(stderr, "[RTG] Splitting message toward %d children:\n", das_getsize(header->root->children));
 #endif
 
-    
+	das_init_traverse(header->root->children);
+	while((child = (tree_node_t*)das_traverse(header->root->children)) != NULL){
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "         %d\n", child->this.id);
+#endif
 
-    // Route each pivot
-    while(pivot_index < list_size(pivots)){
-	pivot = (tree_node*)list_at(pivots, pivot_index);
+	    packet_t* child_packet = copy_packet(call, packet, header, INCREMENT);
+	    header_t* child_header = PACKET_HEADER(child_packet, node_data);
+	    child_header->root = child;
+	    child_header->dest = child->this;
+            child_header->mode = GREEDY;
+            child_header->gfg_check_point = my_pos;
 
-	if(pivot == NULL){
-	    fprintf(stderr, "Called for pivot index %d, passed the end of the pivot list with size %d.\n", pivot_index, list_size(pivots));
-	    return;
+	    gfg_forward(call, child_packet);	    		
 	}
-
-	// If pivot has already been successfully reached
-        if(compare_destinations(&pivot->location, &my_pos)){
-	    // Add its children to pivot list, then remove it.
-            for(c = 0; c < pivot->child_count; c++){
-		list_push_back(pivots, (void*)pivot->children[c]);
-		add_child(header->root, pivot->children[c]);
-		remove_child(pivot, 0);
-	    }
-#ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] Successfully delivered to destination %d.\n", my_pos.id);
-#endif
-	    list_remove(pivots, (void*)pivot);
-        }
-	// Otherwise, deliver to next node
-        else{
-            destination_t* next = NULL;
-
-            // Find greedy next neighbor
-	    destination_t *gg_nbr = NULL;
-	    int size = das_getsize(node_data->gg_list);
-	    das_init_traverse(node_data->gg_list);
-
-#ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] Looking for greedy neighbor for pivot %d (%f, %f) -\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
-#endif
-	    for(i = 0; i < size; ++i){
-		gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
-
-                // If the total distance of all pivot sub-destinations is less for the target node than the current
-		// position, consider this node when calculating the closest neighbor to the pivot.
-                if(distance_sum(pivot, gg_nbr->position) < distance_sum(pivot, my_pos.position)){
-#ifdef LOG_ROUTING
-		    fprintf(stderr, "         Considering %d (%f, %f) <%f away> ... ", gg_nbr->id, gg_nbr->position.x, gg_nbr->position.y, compute_distance(gg_nbr->position, pivot->location.position));
-#endif
-		    if(next == NULL || compute_distance(gg_nbr->position, pivot->location.position) < compute_distance(next->position, pivot->location.position)){
-#ifdef LOG_ROUTING
-			fprintf(stderr, "Chosen");
-#endif
-			
-			next = gg_nbr;
-		    }
-#ifdef LOG_ROUTING
-			fprintf(stderr, "\n");
-#endif
-		}
-	    }
-
-            // If a greedy neighbor is successfully found for this pivot ...
-            if(next != NULL){
-		// Add a request to send this pivot to the greedy neighbor
-		request = NEW(spawn_request*);
-		request->pivot = pivot;
-		request->target = next;
-
-		list_push_back(requests, (void*)request);
-
-#ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] Adding spawn request <P %d, T %d>\n", pivot->location.id, next->id);
-#endif
-		
-		// remove successfully directed pivot
-		list_remove(pivots, (void*)pivot);		
-	    }
-	    // Failed greedy routing ... Checking if failed pivot has any children
-            else if(pivot->child_count != 0){
-
-		// Choose last child, and reattach to root.
-		// Next iteration will continue to attempt routing of this same pivot.
-		tree_node* last_child = pivot->children[pivot->child_count - 1];
-
-		list_push_back(pivots, (void*)last_child);
-		remove_child(pivot, pivot->child_count - 1);
-		add_child(header->root, last_child);
-
-#ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] Failed greedy routing ... reattaching child %d (%f, %f)\n", last_child->location.id, last_child->location.position.x, last_child->location.position.y);
-#endif
-
-		// If we have just detached a child from a virtual split, remove
-		// the now unnecessary virtual node
-		if(pivot->child_count == 1 && pivot->isVirtual){
-#ifdef LOG_ROUTING
-		    fprintf(stderr, "[RTG] Remaining parent is a virtual split. Reattaching remaining child %d.\n", pivot->children[0]->location.id);
-#endif
-		    add_child(header->root, pivot->children[0]);
-		    list_push_back(pivots, (void*)pivot->children[0]);
-		    remove_child(pivot, 0);
-		    list_remove(pivots, (void*)pivot);
-		}
-	    }
-	    // Failed greedy routing, and pivot is childless
-	    else{
-		// If virtual, remove it
-		if(pivot->isVirtual){
-
-#ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] Failed greedy routing ... removing virtual childess pivot.\n");
-#endif
-		    list_remove(pivots, (void*)pivot);
-		}
-		// Otherwise, skip this pivot for now
-		else{
-#ifdef LOG_ROUTING
-		    fprintf(stderr, "[RTG] Failed greedy routing ... Skipping this pivot.\n");
-#endif
-		    pivot_index++;
-		}		
-	    }
-        }
-
-    }
-
-#ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Main pivot loop completed with spawn %d requests.", list_size(requests));
-    if(list_size(requests) > 0){
-	fprintf(stderr, ":\n");
-	list_start_traversal(requests);
-        while((request = (spawn_request*)list_traverse(requests)) != NULL){
-            fprintf(stderr, "         (%d, %d)\n", request->pivot->location.id, request->target->id);
-        }
     }
     else{
-	fprintf(stderr, "\n");
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG] GFG forwarding toward destination %d.\n", header->root->this.id);
+#endif
+	gfg_forward(call, packet);
     }
-#endif
-
-    bool release = true;
-
-    // If currently face routing, determine whether to continue previous face routing.
-    if(header->face_mode){
-
-#ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG] Determining if continue bundled face routing occurs ... \n");
-#endif
-		
-	// If there are any requests to even send out, check that this is not a continued face routing
-	if(list_size(requests) > 0){
-
-	    // Gather number of targets current requests cover
-            int requested_targets = 0;	
-
-	    list_start_traversal(requests);
-	    while((request = (spawn_request*)list_traverse(requests)) != NULL){
-		requested_targets += sub_target_count(request->pivot);
-	    }
-
-	    list_start_traversal(requests);
-	    destination_t* first_target = ((spawn_request*)list_traverse(requests))->target;
-
-	    double check_point = compute_distance(header->gmp_check_point.position, header->dest.position);
-	    double attempted_progress = compute_distance(first_target->position, header->dest.position);
-
-#ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] %d/%d targets attempting greedy routing.\n", requested_targets, header->target_count);
-	    fprintf(stderr, "[RTG] First target (%d|%f) attempting progress from previous check point (%d|%f)\n",
-		first_target->id, attempted_progress,
-		header->gmp_check_point.id, check_point);
-#endif
-
-	    // If collective greedy decisions are making any progress, or not all pivots are travelling in the
-	    // same direction, fulfill the requests. Otherwise, it is a continued face routing.
-
-	    bool all_one = requested_targets == header->target_count;
-	    bool progress = attempted_progress < check_point;
-
-	    fprintf(stderr, "[RTG] progress:%d, all_one:%d\n", progress, all_one);
-	    if(all_one && !progress){
-
-		release = false;
-
-		while((request = (spawn_request*)list_traverse(requests)) != NULL){
-		    if(request->target->id != first_target->id){
-			release = true;
-			break;
-		    }
-		}
-	    }
-	}
-	else{
-	    release = false;
-	}
-    }
-    
-    if(release){
-    	// Found not to be a continued face routing; honor requests.
-
-#ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG] Sending out requested pivot spawns ... \n");
-#endif
-
-	list_start_traversal(requests);
-	while((request = (spawn_request*)list_traverse(requests)) != NULL){
-	    // Send split-off pivot to chosen neighbor
-	    // Gather non-virtual sub-destinations of pivot		  
-	    destination_t** vp = sub_target_list(request->pivot);
-	    int vp_count = sub_target_count(request->pivot);
-
-#ifdef LOG_ROUTING
-            fprintf(stderr, "[RTG] Sending pivot %d to best neighbor %d\n", request->pivot->location.id, request->target->id);
-	    fprintf(stderr, "         With destinations:\n");
-	    for(i = 0; i < vp_count; i++){
-	    	fprintf(stderr, "            %d\n", vp[i]->id);
-	    }
-#endif
-	    // Send to greedy neighbor
-	    packet_t* spawn_packet = copy_packet(call, packet, header, INCREMENT);
-	    header_t* spawn_header = PACKET_HEADER(spawn_packet, node_data);
-
-	    spawn_header->sender = my_pos;
-	    spawn_header->next_node = *(request->target);
-	    spawn_header->face_mode = false;
-	    spawn_header->target_list = vp;
-	    spawn_header->target_count = vp_count;
-	    spawn_header->root = build_steiner_tree(request->target, vp, vp_count);
-
-	    if(set_mac_header_tx(call, spawn_packet) == ERROR)
-		fprintf(stderr, "[ERR] Can't route GMP spawn.\n");
-	}
-
-	// Now, initiate a face routing for any leftover pivots which were not successfully greedily routed.
-    	if(list_size(pivots) > 0){
-
-#ifdef LOG_ROUTING
-            fprintf(stderr, "[RTG] Face routing remaining pivots:\n");
-#endif
-
-	    // Gather non-virtual sub-destinations		  
-	    int vp_count = list_size(pivots);
-	    destination_t** vp = malloc(sizeof(destination_t*) * vp_count);
-	    i = 0;
-
-            list_start_traversal(pivots);
-            while((pivot = (tree_node*)list_traverse(pivots)) != NULL){
-
-#ifdef LOG_ROUTING
-                fprintf(stderr, "         %d (%f, %f)\n", pivot->location.id, pivot->location.position.x, pivot->location.position.y);
-#endif
-		vp[i++] = &pivot->location;
-            }
-
-	    // Start face routing
-	    // Compute the centroid of all targets as the collective FACE-routing destination
-	    double centroid_x = 0;
-	    double centroid_y = 0;
-
-	    for(i = 0; i < vp_count; i++){
-		centroid_x += vp[i]->position.x;
-		centroid_y += vp[i]->position.y;
-	    }
-	    centroid_x /= vp_count;
-	    centroid_y /= vp_count;
-
-	    position_t centroid_pos = {centroid_x, centroid_y, 0};
-	    destination_t centroid = {-3, centroid_pos};
-
-	    header->dest = centroid;
-
-	    // Choose best direction to face route in
-	    destination_t leftChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_L);
-            destination_t rightChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_R);
-
-            if(get_acute_angle_triple(leftChoice.position, my_pos.position, centroid_pos) < get_acute_angle_triple(rightChoice.position, my_pos.position, centroid_pos)){
-                header->direction = TRAVERSE_L;
-                header->next_node = leftChoice;
-            }
-            else{
-                header->direction = TRAVERSE_R;
-                header->next_node = rightChoice;
-            }
-
-	    // Forward face-routing GMP packet
-	    header->sender = my_pos;
-	    header->face_mode = true;
-	    header->target_list = vp;
-	    header->target_count = vp_count;
-	    header->root = build_steiner_tree(&header->next_node, vp, vp_count);
-	    header->gmp_check_point = my_pos;
-
-	    if(set_mac_header_tx(call, packet) == ERROR)
-		fprintf(stderr, "[ERR] Can't route GMP-Face spawn.\n");
-
-        }
-    }
-    else{
-	// determine next neighbor according to face routing.
-	destination_t face_next = next_on_face(call, &my_pos, &header->sender, header->direction);
-
-#ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG] Appears to be a continued face routing; continuing routing to %d\n", face_next.id);
-#endif
-
-	header->root = build_steiner_tree(&face_next, header->target_list, header->target_count);
-	face_forward(call, packet);
-    }
-
-    // Cleanup
-    list_clear(pivots);
-    free(pivots);
-    list_clean(requests);
 
     return;
 }
@@ -1538,7 +1241,7 @@ void gfg_forward(call_t *call, packet_t *packet){
 
     double check_point = compute_distance(header->gfg_check_point.position, header->dest.position);
     double current_progress = compute_distance(my_pos.position, header->dest.position);
-    bool progress = (current_progress < check_point) && (header->gfg_check_point.id != call->node);
+    bool progress = current_progress < check_point;
 
     // If in Greedy mode, or if progress toward destination was made since the last switch to Face mode, route greedily
     if(header->mode == GREEDY || progress){
@@ -1604,8 +1307,151 @@ bool check_in_target_list(destination_t** target_list, int target_count, destina
     return false;
 }
 
+// Check if two edges "bypass": if their extended lines intersect
+bool edges_bypass(position_t a1, position_t a2, position_t b1, position_t b2){
+    double slope = (b1.y - b2.y) / (b1.x - b2.x);
+    double dist1 = a1.x * slope - a1.y;
+    double dist2 = a2.x * slope - a2.y;
+
+    return (dist1 < 0) == (dist2 < 0);
+}
+
 ////////////////////////////////////////////////////////////////////////////////
-// TREE FUNCTIONS
+// MINIMUM SPANNING TREE FUNCTIONS
+
+// Build spanning tree from a list of destinations
+tree_node_t* get_mst(call_t *call, void* dests)
+{
+    destination_t my_pos = THIS_DESTINATION(call), none = NO_DESTINATION;       
+    void *added = das_create();
+
+    //init tree root to source node 
+    tree_node_t *root = NEW(tree_node_t);
+    root->this = my_pos;              
+    root->parent = none;
+    root->children = das_create();
+
+    //find next closest not already added target and add to tree
+    while(das_getsize(added) < das_getsize(dests))
+    {
+        winner_t tmp, shortest;         
+        shortest.distance = 0;                 
+        destination_t *to_add = NULL;
+
+        das_init_traverse(dests);
+        while((to_add = (destination_t*)das_traverse(dests)) != NULL)
+        {
+            if(!check_node_in(added, to_add->id))
+            {
+                tmp = get_shortest_dist(root, to_add);
+                if(shortest.distance == 0 || tmp.distance < shortest.distance)
+                    shortest = tmp;
+            }  
+        }
+        tree_node_t *branch;
+        if((branch = get_branch(root, shortest.parent)) == NULL)
+        {
+            fprintf(stderr, "[ERR] Parent not found in tree\n");
+            delete_tree(root);
+            return NULL;
+        }
+        tree_node_t *new_child = NEW(tree_node_t);
+        new_child->this = *shortest.to_add;
+        new_child->parent = branch->this;
+        new_child->children = das_create();
+        das_insert(branch->children, (void*)new_child);
+        new_child = NULL;
+        das_insert(added, (void*)shortest.to_add);
+    }
+    return root;
+}
+
+// Get shortest new edge
+winner_t get_shortest_dist(tree_node_t *root, destination_t *to_add)
+{
+    winner_t to_return, tmp;
+    to_return.parent = &root->this;
+    to_return.to_add = to_add;
+    to_return.distance = distance(&root->this.position, &to_add->position);
+
+    if(das_getsize(root->children) != 0)
+    {
+        tree_node_t *child = NULL;
+        das_init_traverse(root->children);
+        while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+        {
+            tmp = get_shortest_dist(child, to_add);
+            if(tmp.distance < to_return.distance)
+                to_return = tmp;
+        }
+    }
+    return to_return;
+}
+
+// Recursively searches a tree for the node that represents a given destination
+tree_node_t* get_branch(tree_node_t *root, destination_t *to_get)
+{
+    if(compare_destinations(&root->this, to_get))
+        return root;
+    tree_node_t *child = NULL, *tmp = NULL;
+    das_init_traverse(root->children);
+    while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+    {
+        tmp = get_branch(child, to_get);
+        if(tmp != NULL && compare_destinations(&tmp->this, to_get))
+            return tmp;
+    }
+    return NULL;
+}
+
+// Print spanning tree
+void print_mst(tree_node_t* node, int tab)
+{
+    int t;
+
+    for(t = 0; t < tab * 3; t++) fprintf(stderr, " ");
+
+    fprintf(stderr, "<id: %d (%f, %f)>\n",
+	node->this.id, node->this.position.x, node->this.position.y);
+
+    tree_node_t* child;
+
+    das_init_traverse(node->children);
+    while((child = (tree_node_t*)das_traverse(node->children)) != NULL){
+	print_mst(child, tab + 1);
+    }
+}
+
+// Check if node exists in child list
+bool check_node_in(void* das, nodeid_t to_check)
+{
+    destination_t *entry = NULL;
+    das_init_traverse(das);
+    while((entry = (destination_t*)das_traverse(das)) != NULL)
+    {
+        if(entry->id == to_check)
+            return true;               
+    }                    
+    return false;      
+}
+
+// Delete spanning tree
+void delete_tree(tree_node_t *root)
+{
+    if(das_getsize(root->children) != 0)
+    {
+        tree_node_t *child = NULL;
+
+        das_init_traverse(root->children);
+        while((child = (tree_node_t*)das_traverse(root->children)) != NULL)
+            delete_tree(child);
+    }
+    free(root);
+    return;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// STEINER TREE FUNCTIONS
 
 // Build a Steiner tree out of a given list of real targets
 tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count)
@@ -2253,7 +2099,7 @@ position_t get_intersection_point(position_t a1, position_t a2, position_t b1, p
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-// Routing Functions - Face traversal
+// Routing Functions - Old
 
 // returns next node for face routing
 destination_t next_on_face(call_t *call, destination_t *start,
@@ -2970,8 +2816,7 @@ void rx(call_t *call, packet_t *packet)
     if(header->ttl != 0)
     {
 	// forward
-	tx(call, packet);
-
+        tx(call, packet);
 	if(!check_in_target_list(header->destination_list, header->destination_count, &me))
 	    return;
     }
@@ -2992,12 +2837,11 @@ void rx(call_t *call, packet_t *packet)
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] delivering packet at %d\n", call->node);
 #endif
-
     if(!node_data->received_packet)
     {
-        entity_data->last_reached = call->node;
-    	entity_data->deliver_num_hops = entity_data->total_num_hops;
-	node_data->received_packet = true;	
+	entity_data->last_reached = call->node;
+	entity_data->deliver_num_hops = entity_data->total_num_hops;
+	node_data->received_packet = true;
     }
     while(i--)
     {
