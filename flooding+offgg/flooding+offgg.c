@@ -1,5 +1,5 @@
-// spg.c
-// Stateless Planar Geocasting Module with Geocasting Dijkstra and Connected
+// flooding+offgg.c
+// Stateful Flooding Module with Geocasting Dijkstra and Connected
 // Dominating Set, plus error rate
 // James Robinson
 // 12/11/2016
