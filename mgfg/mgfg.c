@@ -1,5 +1,5 @@
-// mflood.c
-// Stateful Flooding for Multicasting Protocol Module with Dijkstra
+// mgfg.c
+// Multiple-Greedy Face Greedy (M-GFG) for Multicasting Protocol Module with Dijkstra
 // plus error rate and offline planarization
 // Jordan Adamek
 // 12/11/2016
@@ -18,7 +18,7 @@
 
 model_t model = 
 {
-    "M-Flood with BFS, CDS, and error rate",
+    "M-GFG with BFS, CDS, and error rate",
     "Jordan Adamek",
     "0.1",
     MODELTYPE_ROUTING,
