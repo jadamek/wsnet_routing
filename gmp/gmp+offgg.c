@@ -2322,32 +2322,6 @@ destination_t next_on_face(call_t *call, destination_t *start,
 intersection_e check_intersect(call_t *call, destination_t *source,
     destination_t *dest, destination_t *next)
 {
-    if(check_in_geocast(dest, next))
-	return INTERSECTION;
-    if(!check_in_geocast(dest, source))
-    {
-	destination_t corner = *dest;
-	corner.position.x -= 1;
-	corner.position.y -= 1;
-	if(check_intersect(call, &corner, dest, next) != NO_INT)
-	    return INTERSECTION;
-	corner = *dest;
-	corner.position.x += 1;
-	corner.position.y -= 1;
-	if(check_intersect(call, &corner, dest, next) != NO_INT)
-	    return INTERSECTION;
-	corner = *dest;
-	corner.position.x -= 1;
-	corner.position.y += 1;
-	if(check_intersect(call, &corner, dest, next) != NO_INT)
-	    return INTERSECTION;
-	corner = *dest;
-	corner.position.x += 1;
-	corner.position.y += 1;
-	if(check_intersect(call, &corner, dest, next) != NO_INT)
-	    return INTERSECTION;
-    }
-
     //ignore juncture if either endpoint of previous-current line segment
     //is the source or destination node
     if(next->id == source->id || call->node == source->id)
@@ -2677,7 +2651,8 @@ bool greedy_forward(call_t *call, packet_t *packet)
     double neighbor_distance, min_distance = compute_distance(my_pos.position, header->dest.position);
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] Destination is located at (%f,%f), and current node at (%f,%f); distance of %f.\n", header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
+    fprintf(stderr, "[RTG] Destination is located at (%f,%f), and current node at (%f,%f); distance of %f.\n",
+	header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
 #endif
 
     for(i = 0; i < size; ++i)
@@ -2688,7 +2663,8 @@ bool greedy_forward(call_t *call, packet_t *packet)
         if(check_in_geocast(&header->dest, gg_nbr)) return false;
 
 #ifdef LOG_ROUTING
-	fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the target <%d (%f, %f)>.\n", gg_nbr->id, neighbor_distance, header->dest.id, header->dest.position.x, header->dest.position.y);
+	fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the target <%d (%f, %f)>.\n",
+		gg_nbr->id, neighbor_distance, header->dest.id, header->dest.position.x, header->dest.position.y);
 #endif
 
         if(neighbor_distance < min_distance){
@@ -2721,7 +2697,8 @@ void face_forward(call_t *call, packet_t *packet){
     header->next_node = next_on_face(call, &my_pos, &header->sender, header->direction);
 
 #ifdef LOG_ROUTING
-    fprintf(stderr, "[RTG] %s face traversing from %d torward %d.\n", (header->direction == TRAVERSE_L ? "leftward" : "rightward"), my_pos.id, header->next_node.id);
+    fprintf(stderr, "[RTG] %s face traversing from %d torward %d.\n",
+	(header->direction == TRAVERSE_L ? "leftward" : "rightward"), my_pos.id, header->next_node.id);
 #endif
 
     intersection_e result = check_intersect(call, &header->gfg_check_point, &header->dest, &header->next_node);
@@ -2731,7 +2708,8 @@ void face_forward(call_t *call, packet_t *packet){
         header->direction = (header->direction == TRAVERSE_L ? TRAVERSE_R : TRAVERSE_L);
 
 #ifdef LOG_ROUTING
-    	fprintf(stderr, "[RTG] Crossing juncture; switching to %s traversal.\n", (header->direction == TRAVERSE_L ? "leftward" : "rightward"));
+    	fprintf(stderr, "[RTG] Crossing juncture; switching to %s traversal.\n",
+	    (header->direction == TRAVERSE_L ? "leftward" : "rightward"));
 #endif
     }
 

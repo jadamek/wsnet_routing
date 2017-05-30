@@ -111,9 +111,12 @@ typedef struct
     destination_t src;
     destination_t sender;
     destination_t next_node;
+    destination_t check_point;
     packet_e type;
     int ttl;
     void *path;
+    mode_e mode;
+    direction_e direction;
     int target_count;
     destination_t** target_list;
 }header_t;
@@ -125,7 +128,6 @@ typedef struct
     void *gg_list;
     int overhead;
     bool received_packet;
-    bool received_broadcast;
 }node_data_t;
 
 //Global entity data, used for tracking statistics
@@ -172,7 +174,10 @@ bool check_node_in(void*, nodeid_t);
 
 //routing functions - gmp
 void forward(call_t *call, packet_t *packet);
+bool greedy_forward(call_t *call, packet_t *packet);
+void face_forward(call_t *call, packet_t *packet);
 bool check_in_target_list(destination_t** target_list, int target_count, destination_t* to_check);
+destination_t next_on_face(call_t *call, destination_t *start, destination_t *nodeRefs, direction_e direction);
 
 //tx
 void tx(call_t *call, packet_t *packet);
@@ -183,6 +188,9 @@ void rx(call_t *call, packet_t *packet);
 //general helper functions
 double compute_distance(position_t a, position_t b);
 double absolute_value(double n);
+double get_angle_triple(position_t a, position_t b, position_t c);
+double get_acute_angle_triple(position_t a, position_t b, position_t c);
+intersection_e check_intersect(call_t *call, destination_t *source, destination_t *dest, destination_t *next); 
 void* das_select(void *das, int index);
 bool compare_positions(position_t *l, position_t *r);
 bool compare_destinations(destination_t *l, destination_t *r);
@@ -323,7 +331,7 @@ int setnode(call_t *call, void* params)
 	return ERROR;
     }
     node_data->received_packet = false;
-    node_data->received_broadcast = false;
+
     //uncomment later if adding parameters to config file
     /*param_t *param;*/
 
@@ -432,6 +440,9 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     header->dest = *dest;
     header->sender = no_dest;
     header->next_node = no_dest;
+    header->check_point = my_pos;
+    header->direction = NO_DIR;
+    header->mode = GREEDY;
     header->type = DATA_PACKET;
     header->ttl = DEFAULT_TTL;
     header->path = NULL;
@@ -597,6 +608,7 @@ int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, i
     header->src = my_pos;
     header->sender = my_pos;
     header->next_node = no_dest;
+    header->check_point = no_dest;
     header->type = DIJK_PACKET;
     header->ttl = 0;
     header->target_list = target_list;
@@ -841,13 +853,33 @@ void tx(call_t *call, packet_t *packet)
         return;
     }
 
-    if(!node_data->received_broadcast){
+    // If first time routing, sender ID will be NONB, and we must
+    // split the packet into a single GFG message for each destination
+    if(header->sender.id == NONE){
 #ifdef LOG_ROUTING
-        fprintf(stderr, "[RTG]  Flooding at at %d\n", call->node);
+        fprintf(stderr, "[RTG]  Setting initial delivery for %d destinations at %d\n", header->target_count, call->node);
 #endif
+	int i;
+	for(i = 0; i < header->target_count; i++){
+	    // Generate new packet with single destination
+	    packet_t* spawn_packet = copy_packet(call, packet, header, INCREMENT);
+	    header_t* spawn_header = PACKET_HEADER(spawn_packet, node_data);
+	    spawn_header->dest = *header->target_list[i];
 
+	    // GFG-forward this newly spawned packet
+	    forward(call, spawn_packet);
+	}
+
+	// Free this packet
+	packet_dealloc(packet);
+	packet = NULL;
+	header = NULL;
+    }
+    else{
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG]  GFG-routing destination %d at %d\n", header->dest.id, call->node);
+#endif
         forward(call, packet);
-	node_data->received_broadcast = true;
     }
 
 //getchar();
@@ -864,32 +896,148 @@ void forward(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
     destination_t my_pos = THIS_DESTINATION(call);
-    bool sent;
-    
-    //send a packet to every other neighbor              
+
+    bool progress = (my_pos.id != header->check_point.id) &&
+	(compute_distance(my_pos.position, header->dest.position) < compute_distance(header->check_point.position, header->dest.position));
+
+    // If in Greedy mode, or if progress toward destination was made since the last switch to Face mode, route greedily
+    if(header->mode == GREEDY || progress){
+        if(header->mode == FACE){
+#ifdef LOG_ROUTING
+            fprintf(stderr, "[RTG] Made progress toward destination with face routing. Switching back to greedy mode.\n");
+#endif               
+            header->mode = GREEDY;
+        }
+
+        // Succeeded greedy forwarding             
+        if(greedy_forward(call, packet)){  
+            return;
+        }
+        // Failed greedy forwarding; switch to FACE mode
+        else{
+            header->check_point = my_pos;
+            header->mode = FACE;
+
+            // Choose best direction to start face routing in
+            destination_t leftChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_L);
+            destination_t rightChoice = next_on_face(call, &my_pos, &header->dest, TRAVERSE_R);
+
+            if(get_acute_angle_triple(header->dest.position, my_pos.position, leftChoice.position)
+		 < get_acute_angle_triple(header->dest.position, my_pos.position, rightChoice.position)){
+                header->direction = TRAVERSE_L;
+                header->next_node = leftChoice;
+            }
+            else{
+                header->direction = TRAVERSE_R;
+                header->next_node = rightChoice;
+            }
+#ifdef LOG_ROUTING
+	    fprintf(stderr, "[RTG] Reached local maximum at %d. Beginning %s face traversal toward %d.\n", my_pos.id,
+                (header->direction == TRAVERSE_L ? "leftward" : "rightward"), header->next_node.id);
+#endif
+
+            header->sender = my_pos;
+            if(set_mac_header_tx(call, packet) == ERROR)
+                fprintf(stderr, "[ERR] Can't route packet\n");
+
+            return;
+        }
+    }
+    // Otherwise, face route
+    else{
+        face_forward(call, packet);
+    }
+
+    return;
+}
+
+//forward greedily: closest neighbor to destination is next node. Returns false if
+//closest is the current node (local minimum).
+bool greedy_forward(call_t *call, packet_t *packet)
+{
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call);
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] Greedy routing at <%d>.\n", my_pos.id);
+#endif
+
+    //send a packet to the neighbor whose distance to the center of the geocast
+    //area is minimal.
+
     destination_t *gg_nbr = NULL;
     int i, size = das_getsize(node_data->gg_list);
     das_init_traverse(node_data->gg_list);
+
+    destination_t *minimum = &my_pos;
+    double neighbor_distance, min_distance = compute_distance(my_pos.position, header->dest.position);
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] Destination is located at (%f,%f), and current node at (%f,%f); distance of %f.\n",
+        header->dest.position.x,  header->dest.position.y, my_pos.position.x,  my_pos.position.y, min_distance);
+#endif
+
     for(i = 0; i < size; ++i)
     {
         gg_nbr = (destination_t*)das_traverse(node_data->gg_list);
-        if(sent)
-        {
-            packet = copy_packet(call, packet, header, INCREMENT);
-            header = PACKET_HEADER(packet, node_data);
+        neighbor_distance = compute_distance(gg_nbr->position, header->dest.position);
+
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG]   Considering destination node <%d>, which is %f away from the target <%d (%f, %f)>.\n",
+		gg_nbr->id, neighbor_distance, header->dest.id, header->dest.position.x, header->dest.position.y);
+#endif
+
+        if(neighbor_distance < min_distance){
+            minimum = gg_nbr;
+            min_distance = neighbor_distance;
         }
+    }
+
+    if(minimum != &my_pos){
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG]   Sending to %d!\n", minimum->id);
+#endif
         header->sender = my_pos;
-        header->next_node = *gg_nbr;
+        header->next_node = *minimum;
+        header->direction = NO_DIR;
         if(set_mac_header_tx(call, packet) == ERROR)
             fprintf(stderr, "[ERR] Can't route packet\n");
-        sent = true;
+
+        return true;
     }
-    if(!sent)
-    {
-        packet_dealloc(packet);
-        packet = NULL;
-        header = NULL;
+
+    return false;
+}
+
+void face_forward(call_t *call, packet_t *packet){
+    node_data_t *node_data = NODE_DATA(call);
+    header_t *header = PACKET_HEADER(packet, node_data);
+    destination_t my_pos = THIS_DESTINATION(call);
+
+    header->next_node = next_on_face(call, &my_pos, &header->sender, header->direction);
+
+#ifdef LOG_ROUTING
+    fprintf(stderr, "[RTG] %s face traversing from %d torward %d.\n",
+        (header->direction == TRAVERSE_L ? "leftward" : "rightward"), my_pos.id, header->next_node.id);
+#endif
+
+    intersection_e result = check_intersect(call, &header->check_point, &header->dest, &header->next_node);
+
+    // If next node is a juncture, switch traversal directions
+    if(result == INTERSECTION){
+        header->direction = (header->direction == TRAVERSE_L ? TRAVERSE_R : TRAVERSE_L);
+
+#ifdef LOG_ROUTING
+        fprintf(stderr, "[RTG] Crossing juncture; switching to %s traversal.\n",
+            (header->direction == TRAVERSE_L ? "leftward" : "rightward"));    
+#endif
     }
+
+    header->sender = my_pos;
+    if(set_mac_header_tx(call, packet) == ERROR)
+        fprintf(stderr, "[ERR] Can't route packet\n");
+
     return;
 }
 
@@ -902,6 +1050,72 @@ bool check_in_target_list(destination_t** target_list, int target_count, destina
 	if(compare_destinations(target_list[i], to_check)) return true;
     }
     return false;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Routing Functions - Face traversal
+
+// returns next node for face routing
+destination_t next_on_face(call_t *call, destination_t *start,
+    destination_t *nodeRef, direction_e direction)
+{    
+    node_data_t *node_data = NODE_DATA(call);
+    destination_t *gg_nbr = NULL;   
+    double angle, angle_min = 180.0, angle_max = 0.0, vect, d1, d2;
+    destination_t winner = *start, max = *start, no_dest = NO_DESTINATION;
+
+    if(das_getsize(node_data->gg_list) == 0)      
+        return no_dest;
+
+    das_init_traverse(node_data->gg_list);          
+    while((gg_nbr = (destination_t*)das_traverse(node_data->gg_list)) != NULL)
+    {
+        bool result = false;
+        if(gg_nbr->id != nodeRef->id)
+        {
+            //calculate angle between start-ref vector and start-next vector
+            //using dot product                
+            position_t *temp_pos = &gg_nbr->position;
+            d1 = compute_distance(start->position, nodeRef->position);
+            d2 = compute_distance(start->position, *temp_pos); 
+            angle = acos((double)(((start->position.x - nodeRef->position.x) *
+                (start->position.x - temp_pos->x) + (start->position.y -
+                nodeRef->position.y) * (start->position.y - temp_pos->y))
+                / (d1 * d2)));
+
+            //calculate 3-dimensional cross product of start-ref and
+            //start-next, then use the property of right-hand orthogonality
+            //to determine if angle is calculated clockwise or
+            //counter-clockwise
+            vect = (double)((temp_pos->x - start->position.x) *
+                (nodeRef->position.y - start->position.y)) -
+                (double)((temp_pos->y - start->position.y) *
+                (nodeRef->position.x - start->position.x));
+            if((direction == TRAVERSE_R && vect >= 0) || (direction ==
+                TRAVERSE_L && vect <= 0))
+                result = true;
+
+            //find the smallest angle going counter-clockwise
+            if(result && angle <= angle_min)
+            {
+                angle_min = angle;
+                winner = *gg_nbr;
+            }
+            //find the largest angle going clockwise
+            else if(!result && angle >= angle_max)
+            {
+                angle_max = angle;
+                max = *gg_nbr;
+            }
+        }
+    }
+    //extreme cases
+    if(compare_destinations(&winner, start) == true)
+        winner = max;
+    if(compare_destinations(&winner, start) == true)
+        winner = *nodeRef;
+
+    return winner;
 }
 
 //attempts to set mac header, if successful, sends packet to mac module for
@@ -1083,6 +1297,110 @@ double compute_distance(position_t a, position_t b){
 double absolute_value(double n){
     if(n < 0) n *= -1;
     return n;
+}
+
+// Get the counter-clockwise angle <ABC
+double get_angle_triple(position_t a, position_t b, position_t c)
+{
+    return atan2(c.y - b.y, c.x - b.x) - atan2(a.y - b.y, a.x - b.x);
+}
+
+// Get the acute angle <ABC
+double get_acute_angle_triple(position_t a, position_t b, position_t c)
+{
+    double angle = absolute_value(get_angle_triple(a, b, c));
+
+    // Choose acute side
+    if(angle > PI) angle = 2 * PI - angle;                
+
+    return angle;        
+}
+
+//check to see if edge traversed is juncture and to start routing next face
+intersection_e check_intersect(call_t *call, destination_t *source,  
+    destination_t *dest, destination_t *next)                 
+{
+    //ignore juncture if either endpoint of previous-current line segment
+    //is the source or destination node
+    if(next->id == source->id || call->node == source->id)
+        return NO_INT;
+    position_t *current_pos = get_node_position(call->node);
+    //calculate 3-dimensional cross products of source-current vector and
+    //source-destination vector and the source-prev vector and
+    //source-destination vector   
+    double vect1 = ((current_pos->x - source->position.x) * (dest->position.y
+        - source->position.y)) - ((current_pos->y - source->position.y) *
+        (dest->position.x - source->position.x));
+
+    double vect2 = ((next->position.x - source->position.x) * (dest->position.y 
+        - source->position.y)) - ((next->position.y - source->position.y) *
+        (dest->position.x - source->position.x));
+
+    //if BOTH vectors have the same sign, they are BOTH on the same side of the
+    //source-destination line, don't change face
+    if((vect1 < 0 && vect2 < 0) || (vect1 > 0 && vect2 >0))
+        return NO_INT;
+
+    //check to see if current-next and source-destination intersect            
+    double a1, a2, b1, b2, c1, c2, det, x, y, dist;
+
+    //get formulas for the two lines the line segments are part of in
+    //Ax + By = C form
+    a1 = dest->position.y - source->position.y;
+    b1 = source->position.x - dest->position.x;
+    c1 = a1 * source->position.x + b1 * source->position.y;
+    a2 = next->position.y - current_pos->y;
+    b2 = current_pos->x - next->position.x;
+    c2 = a2 * current_pos->x + b2 * current_pos->y;
+
+    //if determinant of the two formulas is 0, lines are parallel, check for
+    //overlap of the x coordinates unless source-destination is a vertical
+    //line, then check y coordinates
+    if((det = a1 * b2 - a2 * b1) == 0)
+    {
+        //if(source-destination isn't vertical && min(x)(source-destination) <
+        //max(x)(prev-current) && max(x)(source-destination) >
+        //min(x)(prev-current) || source-destination is vertical &&
+        //min(y)(source-destination) < max(y)(prev-current) &&
+        //max(y)(source-destination) > min(y)(prev-current)
+        if((source->position.x - dest->position.x != 0 &&
+            fmin(source->position.x, dest->position.x) <
+            fmax(current_pos->x, next->position.x) &&
+            fmax(source->position.x, dest->position.x) >
+            fmin(current_pos->x, next->position.x)) ||
+            (source->position.x - dest->position.x == 0 &&
+            fmin(source->position.y, dest->position.y) <
+            fmax(current_pos->y, next->position.y) &&
+            fmax(source->position.y, dest->position.y) >
+            fmin(current_pos->y, next->position.y)))
+        {
+            return COLLINEAR;
+        }
+    }
+    //if lines are not parallel
+    else
+    {
+        //apply Cramer's rule to solve for point of intersection
+        x = (b2 * c1 - b1 * c2)/det;
+        y = (a1 * c2 - a2 * c1)/det;
+
+        //if the length of the vectors formed by the difference of the
+        //destination and point of intersection and the source and point of
+        //intersection equal the length of the source-destination line segment,
+        //then the lines intersect
+        dist = hypot((dest->position.x - x), (dest->position.y - y)) +
+            hypot((source->position.x - x), (source->position.y - y));
+        if(((int)(compute_distance(source->position, dest->position) * PRECISION)) ==
+            (int)(dist * PRECISION))
+        {
+            if(current_pos->x == x && current_pos->y == y)
+                return COLLINEAR;
+            if(next->position.x == x && next->position.y == y)
+                return NO_INT;
+            return INTERSECTION;
+        }
+    }
+    return NO_INT;
 }
 
 //select an item in a das 'index' number of items from the initial position
