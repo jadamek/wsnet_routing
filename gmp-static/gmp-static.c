@@ -78,7 +78,7 @@ model_t model =
 ////////////////////////////////////////////////////////////////////////////////
 // Structures and Typedefs
 
-typedef enum {HELLO_PACKET, DATA_PACKET, LM_PACKET, D_PACKET} packet_e;
+typedef enum {DATA_PACKET, DIJK_PACKET} packet_e;
 typedef enum {NO_DIR, TRAVERSE_R, TRAVERSE_L, BOTH} direction_e;
 typedef enum {NO_INT, INTERSECTION, COLLINEAR} intersection_e;
 typedef enum {NOT_FOUND, FOUND_THIS, FOUND_OTHER_1, FOUND_OTHER_2} mate_e;
@@ -97,6 +97,14 @@ typedef struct
     nodeid_t this;
     nodeid_t prev;
 }visited_node_t;
+
+typedef struct              
+{
+    nodeid_t target;          
+    uint64_t start;               
+    uint64_t latency;    
+    void *path;
+}path_t;
 
 //Routing tree of multicast targets
 typedef struct tnode
@@ -159,13 +167,14 @@ typedef struct
 //Global entity data, used for tracking statistics
 typedef struct
 {
-    double loss_rate;
     int num_reachable;
     int total_num_hops;
     int deliver_num_hops;
     int num_packets;
     float scale_postscript;
     uint64_t dijk_latency;
+    nodeid_t last_reached;
+    void* paths;
 }entity_data_t;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -197,9 +206,12 @@ void add_outside_nbr(call_t *call, void *list, destination_t *dest);
 void planarize_graph(call_t *call);
 int hello_callback(call_t *call, void *args);
 int start_dijk(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
-void* get_shortest_path(call_t *call, destination_t *dest, destination_t** target_list, int target_count);
+int dijk_start(call_t*, void*);
+void* get_shortest_path(call_t*, void*);
+void* make_path(call_t*, void*, visited_node_t*);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
+bool check_node_in(void*, nodeid_t);
 
 // steiner tree construction functions
 tree_node* build_steiner_tree(destination_t* source, destination_t** target_list, int target_count);
@@ -252,7 +264,6 @@ void tx(call_t *call, packet_t *packet);
 
 //receiving functions
 void rx(call_t *call, packet_t *packet);
-bool packet_lost(call_t *call);
 mate_e find_mate(call_t *call, packet_t *packet);
 mate_e sf_find_mate(call_t *call, packet_t *packet);
 
@@ -282,7 +293,6 @@ void topo_post_data(call_t *call);
 
 int init(call_t *call, void* params)
 {
-    param_t *param = NULL;
     entity_data_t *entity_data = NULL;
     if((entity_data = NEW(entity_data_t)) == NULL)
     {
@@ -293,15 +303,14 @@ int init(call_t *call, void* params)
     entity_data->deliver_num_hops = 0;
     entity_data->total_num_hops = 0;
     entity_data->num_packets = 1;
-    entity_data->loss_rate = 0;
     entity_data->num_reachable = 0;
+    entity_data->last_reached = NONE;
+    entity_data->dijk_latency = 0;
 
-    das_init_traverse(params);
-    while((param = (param_t*)das_traverse(params)) != NULL)
+    if((entity_data->paths = das_create()) == NULL)
     {
-	if(!strcmp(param->key, "loss_rate"))
-	    get_param_double_range(param->value, &(entity_data->loss_rate),
-		0, 100);
+        fprintf(stderr, "[ERR] Can't alocate entity_data paths\n");
+        return ERROR;
     }
 
 #if defined LOG_TOPO_G || defined LOG_GG
@@ -340,6 +349,20 @@ int destroy(call_t *call)
     FILE *results;
     char *name = (char*)malloc(11 * sizeof(int));
     sprintf(name, "results.txt");
+
+    if(entity_data->last_reached != NONE)
+    {
+        path_t *to_check = NULL;
+        das_init_traverse(entity_data->paths);
+        while((to_check = (path_t*)das_traverse(entity_data->paths)) != NULL)
+        {
+            if(to_check->target == entity_data->last_reached)
+            {
+                entity_data->dijk_latency = to_check->latency;
+                break;
+            }
+        }
+    }
 
     fprintf(stderr, "Routing Statistics:\n");
     fprintf(stderr, "  number of packets: %d\n", entity_data->num_packets);
@@ -882,6 +905,8 @@ int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, i
     node_data_t *node_data = NODE_DATA(call);
     destination_t my_pos = THIS_DESTINATION(call), no_dest = NO_DESTINATION;
     packet_t *packet = NULL;
+    int i;
+
     if((packet = packet_alloc(call, node_data->overhead + sizeof(header_t) +
 	DEFAULT_PACKET_SIZE))
 	== NULL)
@@ -896,44 +921,73 @@ int start_dijk(call_t *call, destination_t* dest, destination_t** target_list, i
     header->src = my_pos;
     header->sender = my_pos;
     header->next_node = no_dest;
-    header->type = D_PACKET;
+    header->type = DIJK_PACKET;
     header->direction = NO_DIR;
     header->ttl = 0;
     header->target_list = target_list;
     header->target_count = target_count;
 
-    if((header->path = get_shortest_path(call, dest, target_list, target_count)) == NULL)
+    void* dests = das_create();
+    for(i = 0; i < target_count; i++){
+        das_insert(dests, (void*)header->target_list[i]);
+    }
+
+    if((entity_data->paths = get_shortest_path(call, dests)) == NULL)
     {
 	fprintf(stderr, "[ERR] No shortest path found\n");
 	return ERROR;
     }
-    tx(call, packet);
+
+    path_t *to_start = NULL;
+    das_init_traverse(entity_data->paths);
+    for(i = 0; i < das_getsize(entity_data->paths); i++)
+    {
+        packet_t *packet_2 = NULL;
+        header_t *header_2 = NULL;
+
+        to_start = (path_t*)das_traverse(entity_data->paths);
+        if(i < das_getsize(entity_data->paths) - 1)
+        {
+            packet_2 = copy_packet(call, packet, header, DONT_INCREMENT);
+            header_2 = PACKET_HEADER(packet_2, node_data);
+            header_2->path = to_start->path;
+            to_start->start = get_time() + i * PERIOD;
+            scheduler_add_callback(get_time() + i * PERIOD, call, dijk_start,
+                (void*)packet_2);
+        }
+        else
+        {
+            header->path = to_start->path;
+            to_start->start = get_time() + i * PERIOD;
+            scheduler_add_callback(get_time() + i * PERIOD, call, dijk_start,
+                (void*)packet);
+        }
+    }
+
     return 0;
 }
 
-void* get_shortest_path(call_t *call, destination_t* dest, destination_t** target_list, int target_count)
+int dijk_start(call_t *call, void *args)
+{
+    tx(call, (packet_t*)args);
+    return 0;
+}
+
+void* get_shortest_path(call_t *call, void* dests)
 {
     entity_data_t *entity_data = ENTITY_DATA(call);
     node_data_t *node_data = NODE_DATA(call);
     call_t call_next = *call;
     destination_t *tmp = NULL;
     visited_node_t *tmp1 = NEW(visited_node_t), *tmp2 = NULL,
-	*new = NEW(visited_node_t), *last_found = NEW(visited_node_t);
-    void *visited = das_create(), *to_check = das_create();
-    int num_targets = 0, i;
+        *new = NEW(visited_node_t), *last_found = NEW(visited_node_t);
+    path_t *new_path = NULL;
+    void *visited = das_create(), *to_check = das_create(),
+        *paths = das_create();
+    int num_targets = 0;
 
-    //get total num of possible targets
-    for(i = 0; i < get_node_count(); ++i)
-    {
-	if(i == call->node)
-	    continue;
-	destination_t tmp_dest = {i, *get_node_position(i)};
+    num_targets = das_getsize(dests);
 
-	if(check_in_target_list(target_list, target_count, &tmp_dest))
-	    ++num_targets;
-    }
-
-    //add source to list as top of tree
     tmp1->this = call->node;
     tmp1->prev = NONE;
     *new = *tmp1;
@@ -944,84 +998,108 @@ void* get_shortest_path(call_t *call, destination_t* dest, destination_t** targe
     new->this = NONE;
     *last_found = *new;
 
-    //while there are nodes to expand
     while(das_getsize(to_check) != 0)
     {
-	//while there nodes in to_check
-	das_init_traverse(to_check);
-	while((tmp1 = (visited_node_t*)das_traverse(to_check)) != NULL)
-	{
-	    if(tmp2 != NULL)
-	    {
-		das_delete(to_check, (void*)tmp2);
-		tmp2 = NULL;
-	    }
-	    if(das_getsize(to_check) == 0)
-		break;
-	    call_next.node = tmp1->this;
-	    node_data = NODE_DATA(&call_next);
-	    //check nodes neighbor list
-	    das_init_traverse(node_data->gg_list);
-	    while((tmp = (destination_t*)das_traverse(node_data->gg_list))
-		!= NULL)
-	    {
-		//if neighbor isn't already visited
-		if(!check_in_visited(visited, tmp))
-		{
-		    new->this = tmp->id;
-		    new->prev = tmp1->this;
-		    if(check_in_target_list(target_list, target_count, tmp))
-		    {
-			*last_found = *new;
-			entity_data->num_reachable++;
-		    }
-		    if(entity_data->num_reachable == num_targets)
-			break;
-		    tmp2 = new;
-		    das_insert(visited, (void*)new);
-		    new = NEW(visited_node_t);
-		    *new = *tmp2;
-		    das_insert(to_check, (void*)new);
-		    new = NEW(visited_node_t);
-		    tmp2 = NULL;
-		}
-	    }
-	    if(entity_data->num_reachable == num_targets)
-		break;
-	    tmp2 = tmp1;
-	}
-	if(entity_data->num_reachable == num_targets)
-	    break;
+        das_init_traverse(to_check);
+        while((tmp1 = (visited_node_t*)das_traverse(to_check)) != NULL)
+        {
+            if(tmp2 != NULL)
+            {
+                das_delete(to_check, (void*)tmp2);
+                tmp2 = NULL;
+            }
+            if(das_getsize(to_check) == 0)
+                break;
+            call_next.node = tmp1->this;
+            node_data = NODE_DATA(&call_next);
+            das_init_traverse(node_data->gg_list);
+            while((tmp = (destination_t*)das_traverse(node_data->gg_list))
+                != NULL)
+            {
+                if(!check_in_visited(visited, tmp))
+                {
+                    new->this = tmp->id;
+                    new->prev = tmp1->this;
+                    if(check_node_in(dests, tmp->id))
+                    {
+                        *last_found = *new;
+                        new_path = NEW(path_t);
+			new_path->target = last_found->this;
+                        new_path->latency = 0;
+			new_path->path = make_path(call, visited, last_found);
+                        das_insert(paths, (void*)new_path);
+                        new_path = NULL;
+                        entity_data->num_reachable++;
+                    }
+                    if(entity_data->num_reachable == num_targets)
+                        break;
+                    tmp2 = new;
+                    das_insert(visited, (void*)new);                  
+                    new = NEW(visited_node_t);
+                    *new = *tmp2;
+                    das_insert(to_check, (void*)new);
+                    new = NEW(visited_node_t);
+                    tmp2 = NULL;
+                }
+            }
+            if(entity_data->num_reachable == num_targets)
+                break;
+            tmp2 = tmp1;
+        }
+        if(entity_data->num_reachable == num_targets)
+            break;
     }
 
-    //create path structure
-    if(last_found->this == NONE)
-	return NULL;
-    void* path = das_create();
-    nodeid_t* next = NEW(nodeid_t);
-    *next = last_found->this;
-    das_insert(path, (void*)next);
-    while((last_found = get_node(visited, last_found->prev)) != NULL)
-    {
-	if(last_found->this != call->node)
-	{
-	    next = NEW(nodeid_t);
-	    *next = last_found->this;
-	    das_insert(path, (void*)next);
-	}
-    }
-
-    //deallocate used memory
     while((new = (visited_node_t*)das_pop(to_check)) != NULL)
-	free(new);
-    das_destroy(to_check);
+        free(new);
+    das_destroy(to_check);           
     while((new = (visited_node_t*)das_pop(visited)) != NULL)
-	free(new);
+        free(new);                  
     das_destroy(visited);
     to_check = NULL;
-    visited = NULL;
+    visited = NULL;         
 
+    return paths;
+}
+
+void* make_path(call_t *call, void *visited, visited_node_t *end)
+{
+    void *path = NULL;                  
+    if((path = das_create()) == NULL)         
+    {
+        fprintf(stderr, "[ERR] Can't create path to %d\n", end->this);    
+        return NULL;    
+    }        
+    nodeid_t *next = NEW(nodeid_t);                
+    *next = end->this;
+    das_insert(path, (void*)next);      
+    while((end = get_node(visited, end->prev)) != NULL)
+    {
+        if(end->this != call->node)
+        {
+            next = NEW(nodeid_t);              
+            *next = end->this;
+            das_insert(path, (void*)next);
+            next = NULL;
+        }
+    }
+das_init_traverse(path);
+while((next = (nodeid_t*)das_traverse(path)) != NULL)
+fprintf(stderr, "%d, ", *next);
+fprintf(stderr, "\n");
     return path;
+}
+
+bool check_node_in(void* das, nodeid_t to_check)
+{
+    destination_t *entry = NULL;
+    das_init_traverse(das);
+    while((entry = (destination_t*)das_traverse(das)) != NULL)
+    {
+        if(entry->id == to_check)
+            return true;
+    }
+    return false;
 }
 
 bool check_in_visited(void* visited, destination_t *to_check)
@@ -1057,27 +1135,35 @@ void tx(call_t *call, packet_t *packet)
     node_data_t *node_data = NODE_DATA(call);
     header_t *header = PACKET_HEADER(packet, node_data);
 
-    //if dijkstra packet
-    if(header->type == D_PACKET)
+    if(header->type == DIJK_PACKET)
     {
-	if(das_getsize(header->path) == 0)
-	{
-	    entity_data_t *entity_data = ENTITY_DATA(call);
+        if(das_getsize(header->path) == 0)   
+        {
+            entity_data_t *entity_data = ENTITY_DATA(call);
+            path_t *tmp = NULL;
 
-	    entity_data->dijk_latency = get_time() - entity_data->dijk_latency;
-	    packet_dealloc(packet);
-	    return;
-	}
-	destination_t my_pos = THIS_DESTINATION(call);
+            das_init_traverse(entity_data->paths);
+            while((tmp = (path_t*)das_traverse(entity_data->paths)) != NULL)
+            {                 
+                if(tmp->target == call->node)
+                {
+                    tmp->latency = get_time() - tmp->start;
+                    break;
+                }           
+            }         
+            packet_dealloc(packet);
+            return;
+        }
 
-	header->next_node.id = *((nodeid_t*)das_pop(header->path)),
-	header->next_node.position = *get_node_position(header->next_node.id);
-	header->sender = my_pos;
-	if(set_mac_header_tx(call, packet) == ERROR)
-	    fprintf(stderr, "[ERR] Can't route packet at %d\n", call->node);
-	return;
+        destination_t my_pos = THIS_DESTINATION(call);
+        header->next_node.id = *((nodeid_t*)das_pop(header->path));
+        header->next_node.position = *get_node_position(header->next_node.id);
+        header->sender = my_pos;
+        if(set_mac_header_tx(call, packet) == ERROR)
+            fprintf(stderr, "[ERR] Can't route dijkstra packet at %d\n",
+                call->node);
+        return;
     }
-
 
 #ifdef LOG_ROUTING
     fprintf(stderr, "[RTG] GMP-static routing to %d at %d\n", header->dest.id, call->node);
@@ -1137,6 +1223,8 @@ void forward(call_t *call, packet_t *packet)
 	    header_t* child_header = PACKET_HEADER(child_packet, node_data);
 	    child_header->root = header->root->children[i];
 	    child_header->dest = child_header->root->location;
+	    child_header->mode = GREEDY;
+	    child_header->gfg_check_point = my_pos;
 
 	    gfg_forward(call, child_packet);	    		
 	}
@@ -1162,7 +1250,7 @@ void gfg_forward(call_t *call, packet_t *packet){
 
     double check_point = compute_distance(header->gfg_check_point.position, header->dest.position);
     double current_progress = compute_distance(my_pos.position, header->dest.position);
-    bool progress = current_progress < check_point;
+    bool progress = (current_progress < check_point) && (header->gfg_check_point.id != call->node);
 
     // If in Greedy mode, or if progress toward destination was made since the last switch to Face mode, route greedily
     if(header->mode == GREEDY || progress){
@@ -2464,27 +2552,6 @@ void forward_packet(call_t *call, packet_t *packet, direction_e direction)
     return;
 }
 
-//last mile packet delivery
-void deliver_packet(call_t *call, packet_t *packet)
-{
-    node_data_t *node_data = NODE_DATA(call);
-    header_t *header = PACKET_HEADER(packet, node_data);
-    destination_t my_pos = THIS_DESTINATION(call);
-
-    header->next_node = header->dest;
-    header->sender = my_pos;
-    header->type = LM_PACKET;
-    header->direction = NONE;
-
-#ifdef LOG_ROUTING
-    PRINT_ROUTING("[RTG] Last Mile routing to destination %d from %d\n",
-	header->dest.id, call->node);
-#endif
-    if(set_mac_header_tx(call, packet) == ERROR)
-	fprintf(stderr, "[ERR] Can't route packet\n");
-    return;
-}
-
 //attempts to set mac header, if successful, sends packet to mac module for
 //transmission
 //returns true (1) on success
@@ -2520,7 +2587,7 @@ int set_mac_header_tx(call_t *call, packet_t *packet)
     }
     TX(&call_down, packet);
 #ifdef LOG_ROUTING
-    if(header->type == D_PACKET)
+    if(header->type == DIJK_PACKET)
 	PRINT_ROUTING("[RTG] optimal path packet at %d sent to %d\n",
 	    call->node, header->next_node.id);
     else if(header->direction == TRAVERSE_R)
@@ -2613,93 +2680,52 @@ void rx(call_t *call, packet_t *packet)
     destination_t me = THIS_DESTINATION(call);
     int i = up->size;
 
-    switch(header->type)
+    if(header->type == DIJK_PACKET)
     {
-	case D_PACKET:
-	    tx(call, packet);
-	    break;
-	case HELLO_PACKET:
-	    //planarize_graph(call, packet);
+        tx(call, packet);
+        return;              
+    }
+
+    entity_data->total_num_hops++;
+    header->ttl--;
+    if(header->ttl != 0)
+    {
+	// forward
+        tx(call, packet);
+
+	if(!check_in_target_list(header->destination_list, header->destination_count, &me))
+	    return;
+    }
+    else
+    {
+#ifdef LOG_ROUTING
+	fprintf(stderr, "[RTG] packet from %d to %d hit ttl\n",
+	    header->sender.id, call->node);
+#endif
+	if(!check_in_target_list(header->destination_list, header->destination_count, &me))
+	{
 	    packet_dealloc(packet);
 	    packet = NULL;
-	    header = NULL;
-	    break;
-	case DATA_PACKET:
-	    if(packet_lost(call))
-	    {
-#ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] packet from %d to %d lost\n",
-		    header->sender.id, call->node);
-#endif
-		packet_dealloc(packet);
-		packet = NULL;
-		break;
-	    }
-	    entity_data->total_num_hops++;
-	    header->ttl--;
-	    if(header->ttl != 0)
-	    {
-		// forward
-	        tx(call, packet);
+	    return;
+	}
+    }
 
-		if(!check_in_target_list(header->destination_list, header->destination_count, &me))
-		    break;
-	    }
-	    else
-	    {
 #ifdef LOG_ROUTING
-		fprintf(stderr, "[RTG] packet from %d to %d hit ttl\n",
-		    header->sender.id, call->node);
+    fprintf(stderr, "[RTG] delivering packet at %d\n", call->node);
 #endif
-		if(header->dest.id != call->node)
-		{
-		    packet_dealloc(packet);
-		    packet = NULL;
-		    break;
-		}
-	    }
-
-	case LM_PACKET:
-#ifdef LOG_ROUTING
-	    fprintf(stderr, "[RTG] delivering packet at %d\n", call->node);
-#endif
-	    if(header->type == LM_PACKET)
-		entity_data->total_num_hops++;
-	    if(!node_data->received_packet)
-	    {
-		entity_data->deliver_num_hops = entity_data->total_num_hops;
-		node_data->received_packet = true;
-	    }
-	    while(i--)
-	    {
-		call_t call_up = {up->elts[i], call->node, call->entity};
-		packet_t *packet_up;
-		if(i > 0)
-		    packet_up = copy_packet(call, packet, header,
-			DONT_INCREMENT);
-		else if(header->type == LM_PACKET)
-		    packet_up = packet;
-		else
-		    packet_up = copy_packet(call, packet, header,
-			DONT_INCREMENT);
-		RX(&call_up, packet_up);
-	    }
-	    break;
-	default:
-	    break;
+    if(!node_data->received_packet)
+    {
+	entity_data->last_reached = call->node;
+	entity_data->deliver_num_hops = entity_data->total_num_hops;
+	node_data->received_packet = true;
+    }
+    while(i--)
+    {
+	call_t call_up = {up->elts[i], call->node, call->entity};
+	packet_t *packet_up = copy_packet(call, packet, header, DONT_INCREMENT);
+	RX(&call_up, packet_up);
     }
     return;
-}
-
-bool packet_lost(call_t *call)
-{
-    entity_data_t *entity_data = ENTITY_DATA(call);
-
-    if(entity_data->loss_rate == 0)
-	return false;
-    if((get_random_double() * 100) < entity_data->loss_rate)
-	return true;
-    return false;
 }
 
 mate_e find_mate(call_t *call, packet_t *packet)
