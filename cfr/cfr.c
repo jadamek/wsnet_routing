@@ -63,8 +63,8 @@ model_t model =
 ////////////////////////////////////////////////////////////////////////////////
 // Structures and Typedefs
 
-typedef enum {HELLO_PACKET, DATA_PACKET, LM_PACKET} direction_e;
-typedef enum {NO_DIR, TRAVERSE_R, TRAVERSE_L, BOTH} packet_e;
+typedef enum {HELLO_PACKET, DATA_PACKET, LM_PACKET} packet_e;
+typedef enum {NO_DIR, TRAVERSE_R, TRAVERSE_L, BOTH} direction_e;
 typedef enum {NO_INT, INTERSECTION, COLLINEAR} intersection_e;
 typedef enum {NOT_FOUND, FOUND_THIS, FOUND_OTHER_1, FOUND_OTHER_2} mate_e;
 typedef enum {DONT_INCREMENT, INCREMENT} operation_e;
@@ -305,11 +305,13 @@ int unsetnode(call_t *call)
 #endif
 
     //delete neighbor list
+    das_init_traverse(node_data->nbrs);
     while((dest = (destination_t*)das_pop(node_data->nbrs)) != NULL)
 	free(dest);
     das_destroy(node_data->nbrs);
 
     //delete Gabriel Graph neighbor list
+    das_init_traverse(node_data->gg_list);
     while((dest = (destination_t*)das_pop(node_data->gg_list)) != NULL)
 	free(dest);
     das_destroy(node_data->gg_list);
