@@ -12,7 +12,7 @@
 
 #include <include/modelutils.h>
 
-#define LOG_ROUTING
+//#define LOG_ROUTING
 ////////////////////////////////////////////////////////////////////////////////
 // Model Info
 
@@ -42,9 +42,9 @@ model_t model =
 #define DEFAULT_PACKET_SIZE 10
 //time that first run of planarization algorithm starts in nanoseconds
 #define DEFAULT_START_TIME 0
-#define TX_START_TIME 5000000000ull
+#define DIJK_START_TIME 100000000000ull
 #define PERIOD 1000000000
-#define DEFAULT_TTL 500
+#define DEFAULT_TTL 55
 
 //how many decimal places are used in calculations
 #define PRECISION 100000
@@ -166,13 +166,13 @@ void planarize_graph(call_t *call);
 int hello_callback(call_t *call, void *args);
 int start_dijk(call_t *call, void* args);
 int dijk_start(call_t* call, void* dest);
-void* get_shortest_path(call_t *call, void *dests, void* paths);
+void* get_shortest_path(call_t *call, void *dests);
 void* make_path(call_t *call, void* dests, visited_node_t*);
 bool check_in_visited(void *visited, destination_t *to_check);
 visited_node_t* get_node(void *visited, nodeid_t to_get);
 bool check_node_in(void*, nodeid_t);
 
-//routing functions - gmp
+//routing functions - multiple flooding
 void forward(call_t *call, packet_t *packet);
 bool receive_packet(nodeid_t* record, int num_records, nodeid_t id);
 
@@ -284,7 +284,9 @@ int destroy(call_t *call)
         das_init_traverse(entity_data->paths);
         while((to_check = (path_t*)das_traverse(entity_data->paths)) != NULL)
         {
+#ifdef LOG_ROUTING
 	    fprintf(stderr, "[DBG] path<s:%d, t:%d, latency:%lld>\n", to_check->source, to_check->target, to_check->latency);
+#endif
 
             if(to_check->target == entity_data->last_reached && to_check->source == entity_data->last_source)
             {
@@ -486,8 +488,8 @@ int set_header(call_t *call, packet_t *packet, destination_t *dest)
     	}
     }
 
-    scheduler_add_callback(get_node_count() * my_pos.id * TX_START_TIME, call,
-	start_dijk, (void*)packet);
+    // Schedule once only)
+    scheduler_add_callback(DIJK_START_TIME, call, start_dijk, (void*)packet);
 
     //also call set_header in mac layer to initialize mac header for the
     //packet as well
@@ -623,7 +625,9 @@ int start_dijk(call_t *call, void* args)
     }
     header_t *header = PACKET_HEADER(packet, node_data);
 
-    header->dest = my_pos;
+    destination_t dest = {entity_data->last_reached, *get_node_position(entity_data->last_reached)};
+
+    header->dest = dest;
     header->src = my_pos;
     header->sender = my_pos;
     header->next_node = no_dest;
@@ -632,20 +636,29 @@ int start_dijk(call_t *call, void* args)
 
     void* dests = das_create();
     for(i = 0; i < get_node_count(); i++){
-	destination_t* tmp = NEW(destination_t);
-	tmp->id = i;
-	tmp->position = *get_node_position(i);
-
-	das_insert(dests, (void*)tmp);
+	if(i != call->node){
+	    destination_t* tmp = NEW(destination_t);
+	    tmp->id = i;
+	    tmp->position = *get_node_position(i);
+    	    das_insert(dests, (void*)tmp);
+	}
     }
 
-    if((entity_data->paths = get_shortest_path(call, dests, entity_data->paths)) == NULL)
+    void* paths;	
+
+    if((paths = get_shortest_path(call, dests)) == NULL)
     {
         fprintf(stderr, "[ERR] No shortest path found\n");
         return ERROR; 
     }    
 
+    if(entity_data->last_reached == NONE || entity_data->last_source != call->node) return 0;
+#ifdef LOG_ROUTING
+    fprintf(stderr, "Calculating shortest path latency from %d to %d\n", entity_data->last_source, entity_data->last_reached);
+#endif
+
     path_t *to_start = NULL;
+    entity_data->paths = paths;
     das_init_traverse(entity_data->paths);
     for(i = 0; i < das_getsize(entity_data->paths); i++)
     {
@@ -680,7 +693,7 @@ int dijk_start(call_t *call, void *args)
     return 0;
 }
 
-void* get_shortest_path(call_t *call, void* dests, void* paths)
+void* get_shortest_path(call_t *call, void* dests)
 {
     entity_data_t *entity_data = ENTITY_DATA(call);
     node_data_t *node_data = NODE_DATA(call);
@@ -689,7 +702,7 @@ void* get_shortest_path(call_t *call, void* dests, void* paths)
     visited_node_t *tmp1 = NEW(visited_node_t), *tmp2 = NULL,
         *new = NEW(visited_node_t), *last_found = NEW(visited_node_t);
     path_t *new_path = NULL;
-    void *visited = das_create(), *to_check = das_create();
+    void *visited = das_create(), *to_check = das_create(), *paths = das_create();
     int num_targets = 0;
 
     num_targets = das_getsize(dests);
@@ -784,10 +797,6 @@ void* make_path(call_t *call, void *visited, visited_node_t *end)
             next = NULL;
         }
     }
-das_init_traverse(path);
-while((next = (nodeid_t*)das_traverse(path)) != NULL)
-fprintf(stderr, "%d, ", *next);
-fprintf(stderr, "\n");
     return path;
 }
 
@@ -1089,7 +1098,9 @@ void rx(call_t *call, packet_t *packet)
     }
 
     if(received){
+#ifdef LOG_ROUTING
 	fprintf(stderr, "received packet from %d at %d\n", header->src.id, call->node);
+#endif
         entity_data->last_reached = call->node;
 	entity_data->last_source = header->src.id;
     	entity_data->deliver_num_hops = entity_data->total_num_hops;
